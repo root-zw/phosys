@@ -1,0 +1,51 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志和临时文件
+*.log
+*.tmp
+app.log
+
+# 数据目录（容器中会重新创建）
+uploads/*
+!uploads/.gitkeep
+transcripts/*
+!transcripts/.gitkeep
+audio_temp/*
+!audio_temp/.gitkeep
+meeting_summaries/*
+!meeting_summaries/.gitkeep
+
+# 环境配置（使用环境变量）
+.env
+.env.*
+!.env.example
+
+# 文档
+*.md
+!README.md
+
+# 其他
+.DS_Store
+*.tar
+*.zip
+

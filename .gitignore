@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# 环境配置
+.env
+.env.local
+.env.*.local
+
+# 日志
+*.log
+app.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 数据目录
+uploads/*
+!uploads/.gitkeep
+transcripts/*
+!transcripts/.gitkeep
+audio_temp/*
+!audio_temp/.gitkeep
+meeting_summaries/*
+!meeting_summaries/.gitkeep
+
+# 其他
+.DS_Store
+*.tar
+*.zip

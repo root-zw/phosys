@@ -1,0 +1,214 @@
+# config.py
+
+"""
+实时语音转录与声纹分离项目 配置文件
+使用环境变量存储敏感信息，提升安全性
+支持环境区分：development, staging, production
+"""
+
+import os
+from dotenv import load_dotenv
+from pathlib import Path
+
+# 获取环境类型（development, staging, production）
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'development').lower()
+
+# 根据环境加载不同的 .env 文件
+env_file = f'.env.{ENVIRONMENT}' if ENVIRONMENT != 'development' else '.env'
+if Path(env_file).exists():
+    load_dotenv(env_file)
+else:
+    # 回退到默认 .env 文件
+    load_dotenv()
+
+logger = None
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"当前运行环境: {ENVIRONMENT}, 配置文件: {env_file}")
+except:
+    pass
+
+# 1. 文件与目录配置
+# 支持通过环境变量覆盖，便于不同环境使用不同路径
+FILE_CONFIG = {
+    "output_dir": os.getenv("OUTPUT_DIR", "transcripts"),  # 保存最终文本稿的目录
+    "temp_dir": os.getenv("TEMP_DIR", "audio_temp"),  # 存放临时音频文件的目录
+    "upload_dir": os.getenv("UPLOAD_DIR", "uploads"),  # 存放上传文件的目录
+    "summary_dir": os.getenv("SUMMARY_DIR", "meeting_summaries")  # 保存会议纪要的目录
+}
+
+# 2. 模型配置
+MODEL_CONFIG = {
+    # 说话人识别模型（FunASR AutoModel集成方式）
+    # 使用speech_eres2net_sv模型，基于ERes2Net架构
+    # 集成在ASR中实现说话人识别，与demo.py使用的方式一致
+    "diarization": {
+        "model_id": 'iic/speech_campplus_sv_zh-cn_16k-common',  # ERes2Net说话人识别模型（去掉v2）
+        "revision": 'v2.0.2'  # 模型版本
+        # 注：该模型采用ERes2Net架构，性能优秀
+    },
+
+    # 语音转文本（ASR）模型 - SeACo-Paraformer 支持热词定制
+    # SeACo-Paraformer是新一代热词定制化非自回归语音识别模型
+    # 需要配合VAD和PUNC模型使用才能获得带标点的完整输出
+    "asr": {
+        "model_id": 'iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch',
+        "model_revision": 'v2.0.4'
+    },
+    
+    # VAD（语音端点检测）模型
+    # 用于检测语音的起止点，提升识别准确率
+    "vad": {
+        "model_id": 'iic/speech_fsmn_vad_zh-cn-16k-common-pytorch',
+        "model_revision": 'v2.0.4'
+    },
+    
+    # PUNC（标点恢复）模型
+    # 为识别结果添加标点符号，并去除多余空格
+    "punc": {
+        "model_id": 'iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch',
+        "model_revision": 'v2.0.4'
+    },
+    
+    # 热词配置（可选）
+    # SeACo-Paraformer支持热词定制，可以提升特定词汇的识别准确率
+    # 格式：空格分隔的热词列表，例如：'达摩院 魔搭 阿里巴巴'
+    "hotword": '',  # 留空表示不使用热词，使用时填入热词，如：'人工智能 深度学习'
+    
+    # 热词同义词映射配置文件路径（可选）
+    # 如果提供，系统将从该JSON文件加载自定义同义词映射
+    # JSON格式示例：
+    # {
+    #   "AI": ["人工智能", "机器学习"],
+    #   "会议": ["开会", "讨论"]
+    # }
+    "hotword_synonym_config": os.getenv("HOTWORD_SYNONYM_CONFIG", "")  # 留空表示不使用同义词扩展
+}
+
+# 3. 语言配置
+LANGUAGE_CONFIG = {
+    "zh": {
+        "name": "中文普通话",
+        "description": "适用于标准普通话音频",
+        "model_params": {}
+    },
+    "zh-dialect": {
+        "name": "方言混合",
+        "description": "适用于包含方言(如粤语、闽南语等)的音频",
+        "model_params": {}
+    },
+    "zh-en": {
+        "name": "中英混合",
+        "description": "适用于中英文混合的音频",
+        "model_params": {}
+    },
+    "en": {
+        "name": "英文",
+        "description": "适用于纯英文音频",
+        "model_params": {}
+    }
+}
+
+# 4. 音频处理配置
+# ModelScope的语音模型通常要求音频为16kHz采样率的单声道WAV格式
+AUDIO_PROCESS_CONFIG = {
+    "sample_rate": 16000,
+    "channels": 1
+}
+
+# 5. 并发与性能配置（生产级优化）
+# 根据环境调整配置
+if ENVIRONMENT == 'production':
+    # 生产环境：高性能配置
+    CONCURRENCY_CONFIG = {
+        "use_model_pool": True,
+        "asr_pool_size": int(os.getenv("ASR_POOL_SIZE", "6")),
+        "diarization_pool_size": 0,
+        "transcription_workers": int(os.getenv("TRANSCRIPTION_WORKERS", "12")),
+        "max_queue_size": 100,
+        "max_memory_mb": int(os.getenv("MAX_MEMORY_MB", "8192")),
+        "memory_check_interval": 30,
+        "task_timeout": 3600,
+        "model_acquire_timeout": 60,
+        "rate_limit": {
+            "enabled": True,
+            "requests_per_minute": int(os.getenv("RATE_LIMIT_PER_MINUTE", "36")),
+            "requests_per_hour": int(os.getenv("RATE_LIMIT_PER_HOUR", "240"))
+        }
+    }
+elif ENVIRONMENT == 'staging':
+    # 预发布环境：中等配置
+    CONCURRENCY_CONFIG = {
+        "use_model_pool": True,
+        "asr_pool_size": int(os.getenv("ASR_POOL_SIZE", "3")),
+        "diarization_pool_size": 0,
+        "transcription_workers": int(os.getenv("TRANSCRIPTION_WORKERS", "6")),
+        "max_queue_size": 50,
+        "max_memory_mb": int(os.getenv("MAX_MEMORY_MB", "4096")),
+        "memory_check_interval": 30,
+        "task_timeout": 3600,
+        "model_acquire_timeout": 60,
+        "rate_limit": {
+            "enabled": True,
+            "requests_per_minute": int(os.getenv("RATE_LIMIT_PER_MINUTE", "20")),
+            "requests_per_hour": int(os.getenv("RATE_LIMIT_PER_HOUR", "120"))
+        }
+    }
+else:
+    # 开发环境：轻量配置
+    CONCURRENCY_CONFIG = {
+        "use_model_pool": os.getenv("USE_MODEL_POOL", "true").lower() == "true",
+        "asr_pool_size": int(os.getenv("ASR_POOL_SIZE", "1")),
+        "diarization_pool_size": 0,
+        "transcription_workers": int(os.getenv("TRANSCRIPTION_WORKERS", "2")),
+        "max_queue_size": 20,
+        "max_memory_mb": int(os.getenv("MAX_MEMORY_MB", "2048")),
+        "memory_check_interval": 30,
+        "task_timeout": 3600,
+        "model_acquire_timeout": 60,
+        "rate_limit": {
+            "enabled": os.getenv("RATE_LIMIT_ENABLED", "false").lower() == "true",
+            "requests_per_minute": int(os.getenv("RATE_LIMIT_PER_MINUTE", "60")),
+            "requests_per_hour": int(os.getenv("RATE_LIMIT_PER_HOUR", "360"))
+        }
+    }
+
+# 6. Dify Webhook 配置
+# 所有配置必须通过环境变量提供，不提供默认值以确保安全性
+DIFY_CONFIG = {
+    "api_key": os.getenv("DIFY_API_KEY"),  # Dify API Key（必须通过环境变量配置）
+    "base_url": os.getenv("DIFY_BASE_URL"),  # Dify API Base URL（必须通过环境变量配置）
+    # workflow_id: 留空则使用已发布的工作流版本，指定则使用特定版本的工作流 ID
+    # 注意：如果使用 workflow_id，必须是已发布版本的 ID，不能是草稿版本
+    "workflow_id": os.getenv("DIFY_WORKFLOW_ID", ""),  # 可选，留空使用已发布的工作流
+    "user_id": os.getenv("DIFY_USER_ID")  # Dify 用户 ID（必须通过环境变量配置）
+}
+
+# 7. AI模型API配置（用于生成会议纪要）
+# 支持多个模型：DeepSeek、Qwen、GLM
+# 所有配置必须通过环境变量提供，不提供默认值以确保安全性
+AI_MODEL_CONFIG = {
+    "deepseek": {
+        "api_key": os.getenv("DEEPSEEK_API_KEY"),  # DeepSeek API Key（必须通过环境变量配置）
+        "api_base": os.getenv("DEEPSEEK_API_BASE"),  # DeepSeek API Base URL（必须通过环境变量配置）
+        "model": os.getenv("DEEPSEEK_MODEL"),  # DeepSeek 模型名称（必须通过环境变量配置）
+        "display_name": "Deepseek"
+    },
+    "qwen": {
+        "api_key": os.getenv("QWEN_API_KEY"),  # Qwen API Key（必须通过环境变量配置）
+        "api_base": os.getenv("QWEN_API_BASE"),  # Qwen API Base URL（必须通过环境变量配置）
+        "model": os.getenv("QWEN_MODEL"),  # Qwen 模型名称（必须通过环境变量配置）
+        "display_name": "Qwen"
+    },
+    "glm": {
+        "api_key": os.getenv("GLM_API_KEY"),  # GLM API Key（必须通过环境变量配置）
+        "api_base": os.getenv("GLM_API_BASE"),  # GLM API Base URL（必须通过环境变量配置）
+        "model": os.getenv("GLM_MODEL"),  # GLM 模型名称（必须通过环境变量配置）
+        "display_name": "GLM"
+    }
+}
+
+# 向后兼容：保留 DEEPSEEK_CONFIG
+DEEPSEEK_CONFIG = AI_MODEL_CONFIG["deepseek"]
+
