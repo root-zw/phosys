@@ -1,3 +1,5 @@
+# 快速部署指南 v3.1.6-FunASR (2025-12-29)
+
 conda create -n phosys python=3.11
 
 conda activate phosys
@@ -8,4 +10,24 @@ pip install torch torchvision torchaudio -i https://pypi.tuna.tsinghua.edu.cn/si
 
 pip install "modelscope[audio]" -f https://modelscope.oss-cn-beijing.aliyuncs.com/releases/repo.html
 
-pip install "fastapi[all]" slowapi pydub python-docx openai
+pip install "fastapi[all]" slowapi pydub python-docx openai psutil
+
+# 安装 FunASR
+pip install funasr
+
+# 安装 jieba 分词（用于词级别时间戳）
+pip install jieba
+
+# 确保 FFmpeg 已安装
+which ffmpeg || sudo apt install ffmpeg
+
+# 配置环境变量（可选，用于会议纪要功能）
+# 在 .env 文件中配置 API Key：
+# DEEPSEEK_API_KEY=your-api-key
+# 或 QWEN_API_KEY=your-api-key
+# 或 GLM_API_KEY=your-api-key
+
+# 启动服务
+python main.py
+
+# 访问 http://localhost:8998

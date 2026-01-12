@@ -1,7 +1,7 @@
 # 前端功能与API接口对应关系详细文档
 
-> 版本: 3.1.4-FunASR  
-> 更新时间: 2025-12-18  
+> 版本: 3.1.6-FunASR
+> 更新时间: 2025-12-29
 > 说明: 本文档详细描述前端每个功能对应的API接口调用关系
 
 ---
@@ -26,13 +26,13 @@
 - **路径**: `/` 或 `/index.html`
 - **JavaScript**: `/static/js/app.js`
 - **核心类**: `TranscriptionApp`
-- **主要功能**: 文件上传、转写管理、历史记录
+- **主要功能**: 文件上传、转写管理、历史记录、清空所有历史记录
 
 ### 2. 结果页面 (result.html)
 - **路径**: `/result.html?file_id={file_id}`
 - **JavaScript**: `/static/js/result.js`
 - **核心类**: `ResultViewer`
-- **主要功能**: 查看转写结果、下载文档、音频播放、音字同步高亮显示
+- **主要功能**: 查看转写结果、下载文档、音频播放、音字同步高亮显示、生成会议纪要（支持自定义提示词和模型选择）
 
 ---
 
@@ -2064,7 +2064,9 @@ const results = this.transcriptData.filter(entry =>
 | `POST /api/voice/stop/{file_id}` | 点击停止按钮 | 按需 |
 | `DELETE /api/voice/files/{file_id}` | 点击删除按钮 | 按需 |
 | `GET /api/voice/history` | 打开历史记录 | 按需 |
+| `DELETE /api/voice/files/_clear_all` | 清空所有历史记录 | 按需 |
 | `WS /api/voice/ws` | 页面加载 | 1次（持久连接） |
+| `GET /healthz` | Docker 健康检查 | 每1小时（Docker 自动调用） |
 
 ### 结果页面 (result.html)
 
@@ -2129,6 +2131,54 @@ WebSocket推送 / HTTP响应
 ---
 
 ## 最新更新
+
+### v3.1.6-FunASR (2025-12-29)
+
+**配置简化与性能优化**
+
+#### 配置简化
+- ✅ **移除环境区分**：移除 development/staging/production 环境区分，统一使用简化配置
+  - `config.py` 不再根据 `ENVIRONMENT` 环境变量加载不同配置
+  - Docker 配置移除 `ENVIRONMENT` 环境变量
+
+#### 新增功能
+- ✅ **热词 API 传入**：热词参数优先从 API 请求中传入，未传入时从 config.py 读取
+  - 支持在 `/api/voice/transcribe` 和 `PATCH /api/voice/files/{file_id}` 接口中传入 `hotword` 参数
+- ✅ **音频预处理**：上传时自动预处理音频为 16kHz WAV 格式
+- ✅ **会议纪要大纲**：会议纪要模板新增"大纲"字段
+
+#### 接口变更
+- ✅ **移除热词管理 API**：删除 `GET/POST/DELETE /api/voice/hotwords` 接口
+
+---
+
+### v3.1.5-FunASR (2025-12-24)
+
+**健康检查与 Docker 配置优化**
+
+#### 功能修复
+- ✅ **健康检查字段名修复**：修复了模型池统计字段名不匹配问题（`available_count` 和 `current_size`）
+  - 修复前：使用错误的字段名 `available` 和 `pool_size`，导致健康检查总是返回 503
+  - 修复后：使用正确的字段名 `available_count` 和 `current_size`，健康检查正常工作
+- ✅ **延迟加载模式优化**：模型未加载不再影响健康检查状态
+  - 模型未加载是正常状态（延迟加载），不影响服务健康状态
+  - 只有在模型加载后池不可用时才标记为不健康
+- ✅ **Dify 服务可选化**：Dify Webhook 服务作为可选服务，不影响整体健康状态
+  - Dify 连接失败不会导致服务标记为不健康
+  - 添加了明确的提示信息，说明 Dify 是可选服务
+
+#### Docker 配置优化
+- ✅ **环境变量加载修复**：修复了 Docker Compose 中 `DIFY_BASE_URL` 环境变量加载问题
+  - 修复前：`docker-compose.yml` 中的默认值会覆盖 `.env` 文件中的配置
+  - 修复后：`DIFY_BASE_URL` 完全从 `.env` 文件加载，确保配置正确
+- ✅ **健康检查配置优化**：调整了 Docker 健康检查参数
+  - 检查间隔：30秒 → 1小时（降低检查频率）
+  - 启动等待期：60秒 → 120秒（确保存储初始化完成）
+
+#### 技术改进
+- ✅ 优化了健康检查逻辑，支持延迟加载模式
+- ✅ 改进了 Docker 环境变量配置，确保 `.env` 文件正确加载
+- ✅ 增强了错误处理和日志记录
 
 ### v3.1.4-FunASR (2025-12-18)
 

@@ -74,7 +74,7 @@ logger = logging.getLogger('main')
 app = FastAPI(
     title="音频转写系统",
     description="基于AI的实时语音识别与声纹分离系统 (Domain-Application-Infra架构)",
-    version="3.1.3-FunASR"
+    version="3.1.5-FunASR"
 )
 
 # 速率限制
@@ -225,7 +225,7 @@ async def index(request: Request):
     """主页面"""
     if os.path.exists("templates/index.html"):
         return templates.TemplateResponse("index.html", {"request": request})
-    return {"message": "音频转写系统API", "version": "3.1.3-FunASR", "docs": "/docs"}
+    return {"message": "音频转写系统API", "version": "3.1.5-FunASR", "docs": "/docs"}
 
 @app.get("/result.html")
 async def result_page(request: Request):
@@ -247,7 +247,7 @@ async def health_check():
     
     health_status = {
         'status': 'healthy',
-        'version': '3.1.3-FunASR',
+        'version': '3.1.5-FunASR',
         'checks': {}
     }
     
@@ -453,7 +453,7 @@ async def get_system_status():
     status = {
         'success': True,
         'system': 'running',
-        'version': '3.1.3-FunASR',  # 标识FunASR版本
+        'version': '3.1.5-FunASR',  # 标识FunASR版本
         'mode': 'FunASR一体化模式（ASR+说话人识别）',
         'models_loaded': asr_runner is not None
     }

@@ -3,31 +3,13 @@
 """
 实时语音转录与声纹分离项目 配置文件
 使用环境变量存储敏感信息，提升安全性
-支持环境区分：development, staging, production
 """
 
 import os
 from dotenv import load_dotenv
-from pathlib import Path
 
-# 获取环境类型（development, staging, production）
-ENVIRONMENT = os.getenv('ENVIRONMENT', 'development').lower()
-
-# 根据环境加载不同的 .env 文件
-env_file = f'.env.{ENVIRONMENT}' if ENVIRONMENT != 'development' else '.env'
-if Path(env_file).exists():
-    load_dotenv(env_file)
-else:
-    # 回退到默认 .env 文件
-    load_dotenv()
-
-logger = None
-try:
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.info(f"当前运行环境: {ENVIRONMENT}, 配置文件: {env_file}")
-except:
-    pass
+# 加载环境变量
+load_dotenv()
 
 # 1. 文件与目录配置
 # 支持通过环境变量覆盖，便于不同环境使用不同路径
@@ -74,16 +56,7 @@ MODEL_CONFIG = {
     # 热词配置（可选）
     # SeACo-Paraformer支持热词定制，可以提升特定词汇的识别准确率
     # 格式：空格分隔的热词列表，例如：'达摩院 魔搭 阿里巴巴'
-    "hotword": '',  # 留空表示不使用热词，使用时填入热词，如：'人工智能 深度学习'
-    
-    # 热词同义词映射配置文件路径（可选）
-    # 如果提供，系统将从该JSON文件加载自定义同义词映射
-    # JSON格式示例：
-    # {
-    #   "AI": ["人工智能", "机器学习"],
-    #   "会议": ["开会", "讨论"]
-    # }
-    "hotword_synonym_config": os.getenv("HOTWORD_SYNONYM_CONFIG", "")  # 留空表示不使用同义词扩展
+    "hotword": ''  # 留空表示不使用热词，使用时填入热词，如：'人工智能 深度学习'
 }
 
 # 3. 语言配置
@@ -117,65 +90,48 @@ AUDIO_PROCESS_CONFIG = {
     "channels": 1
 }
 
+# 4.1 音频预处理配置
+# 上传后立即预处理音频为16kHz WAV，提升转写性能
+AUDIO_PREPROCESS_CONFIG = {
+    "enabled": os.getenv("AUDIO_PREPROCESS_ENABLED", "true").lower() == "true",  # 是否启用上传时预处理
+    "replace_original": True,  # True=替换原文件（节省空间）, False=保留原文件（占用双倍空间）
+    "target_sample_rate": 16000,  # 目标采样率
+    "target_channels": 1,  # 目标声道数（单声道）
+    "output_format": "wav",  # 输出格式
+    "output_codec": "pcm_s16le",  # 输出编码（16位PCM）
+    "use_gpu_accel": os.getenv("AUDIO_PREPROCESS_GPU", "false").lower() == "true",  # 是否使用GPU加速（需要GPU支持）
+    "fallback_on_error": True,  # 预处理失败时是否保留原文件（避免阻断上传）
+}
+
 # 5. 并发与性能配置（生产级优化）
-# 根据环境调整配置
-if ENVIRONMENT == 'production':
-    # 生产环境：高性能配置
-    CONCURRENCY_CONFIG = {
-        "use_model_pool": True,
-        "asr_pool_size": int(os.getenv("ASR_POOL_SIZE", "6")),
-        "diarization_pool_size": 0,
-        "transcription_workers": int(os.getenv("TRANSCRIPTION_WORKERS", "12")),
-        "max_queue_size": 100,
-        "max_memory_mb": int(os.getenv("MAX_MEMORY_MB", "8192")),
-        "memory_check_interval": 30,
-        "task_timeout": 3600,
-        "model_acquire_timeout": 60,
-        "rate_limit": {
-            "enabled": True,
-            "requests_per_minute": int(os.getenv("RATE_LIMIT_PER_MINUTE", "36")),
-            "requests_per_hour": int(os.getenv("RATE_LIMIT_PER_HOUR", "240"))
-        }
+CONCURRENCY_CONFIG = {
+    # 模型池配置
+    "use_model_pool": True,   # ✅ 启用模型池，支持并发处理
+    "asr_pool_size": 6,       # ASR模型池大小（6个实例，平衡性能与内存）
+    "diarization_pool_size": 0,  # FunASR一体化模式不需要单独的声纹分离池
+
+    # 线程池配置
+    "transcription_workers": 12,  # 转写任务并发数（支持12个音频同时处理）
+    "max_queue_size": 100,   # 任务队列最大长度
+
+    # 内存限制
+    "max_memory_mb": 8192,   # 最大内存使用(MB)，超过此值将拒绝新任务
+    "memory_check_interval": 30,  # 内存检查间隔(秒)
+
+    # 超时配置
+    "task_timeout": 3600,    # 单个任务最大执行时间(秒)
+    "model_acquire_timeout": 60,  # 获取模型超时时间(秒)
+
+    # 限流配置
+    "rate_limit": {
+        "enabled": True,
+        "requests_per_minute": 36,  # 每分钟最大请求数（配合12并发）
+        "requests_per_hour": 240    # 每小时最大请求数（配合12并发）
     }
-elif ENVIRONMENT == 'staging':
-    # 预发布环境：中等配置
-    CONCURRENCY_CONFIG = {
-        "use_model_pool": True,
-        "asr_pool_size": int(os.getenv("ASR_POOL_SIZE", "3")),
-        "diarization_pool_size": 0,
-        "transcription_workers": int(os.getenv("TRANSCRIPTION_WORKERS", "6")),
-        "max_queue_size": 50,
-        "max_memory_mb": int(os.getenv("MAX_MEMORY_MB", "4096")),
-        "memory_check_interval": 30,
-        "task_timeout": 3600,
-        "model_acquire_timeout": 60,
-        "rate_limit": {
-            "enabled": True,
-            "requests_per_minute": int(os.getenv("RATE_LIMIT_PER_MINUTE", "20")),
-            "requests_per_hour": int(os.getenv("RATE_LIMIT_PER_HOUR", "120"))
-        }
-    }
-else:
-    # 开发环境：轻量配置
-    CONCURRENCY_CONFIG = {
-        "use_model_pool": os.getenv("USE_MODEL_POOL", "true").lower() == "true",
-        "asr_pool_size": int(os.getenv("ASR_POOL_SIZE", "1")),
-        "diarization_pool_size": 0,
-        "transcription_workers": int(os.getenv("TRANSCRIPTION_WORKERS", "2")),
-        "max_queue_size": 20,
-        "max_memory_mb": int(os.getenv("MAX_MEMORY_MB", "2048")),
-        "memory_check_interval": 30,
-        "task_timeout": 3600,
-        "model_acquire_timeout": 60,
-        "rate_limit": {
-            "enabled": os.getenv("RATE_LIMIT_ENABLED", "false").lower() == "true",
-            "requests_per_minute": int(os.getenv("RATE_LIMIT_PER_MINUTE", "60")),
-            "requests_per_hour": int(os.getenv("RATE_LIMIT_PER_HOUR", "360"))
-        }
-    }
+}
 
 # 6. Dify Webhook 配置
-# 所有配置必须通过环境变量提供，不提供默认值以确保安全性
+# ⚠️ 所有配置必须通过环境变量提供，不提供默认值以确保安全性
 DIFY_CONFIG = {
     "api_key": os.getenv("DIFY_API_KEY"),  # Dify API Key（必须通过环境变量配置）
     "base_url": os.getenv("DIFY_BASE_URL"),  # Dify API Base URL（必须通过环境变量配置）
@@ -187,24 +143,24 @@ DIFY_CONFIG = {
 
 # 7. AI模型API配置（用于生成会议纪要）
 # 支持多个模型：DeepSeek、Qwen、GLM
-# 所有配置必须通过环境变量提供，不提供默认值以确保安全性
+# ⚠️ 所有API密钥必须通过环境变量提供，不提供默认值以确保安全性
 AI_MODEL_CONFIG = {
     "deepseek": {
         "api_key": os.getenv("DEEPSEEK_API_KEY"),  # DeepSeek API Key（必须通过环境变量配置）
-        "api_base": os.getenv("DEEPSEEK_API_BASE"),  # DeepSeek API Base URL（必须通过环境变量配置）
-        "model": os.getenv("DEEPSEEK_MODEL"),  # DeepSeek 模型名称（必须通过环境变量配置）
+        "api_base": os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com"),  # API Base URL
+        "model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),  # 模型名称
         "display_name": "Deepseek"
     },
     "qwen": {
         "api_key": os.getenv("QWEN_API_KEY"),  # Qwen API Key（必须通过环境变量配置）
-        "api_base": os.getenv("QWEN_API_BASE"),  # Qwen API Base URL（必须通过环境变量配置）
-        "model": os.getenv("QWEN_MODEL"),  # Qwen 模型名称（必须通过环境变量配置）
+        "api_base": os.getenv("QWEN_API_BASE", "https://dashscope.aliyuncs.com/compatible-mode/v1"),  # API Base URL
+        "model": os.getenv("QWEN_MODEL", "qwen-turbo"),  # 模型名称
         "display_name": "Qwen"
     },
     "glm": {
         "api_key": os.getenv("GLM_API_KEY"),  # GLM API Key（必须通过环境变量配置）
-        "api_base": os.getenv("GLM_API_BASE"),  # GLM API Base URL（必须通过环境变量配置）
-        "model": os.getenv("GLM_MODEL"),  # GLM 模型名称（必须通过环境变量配置）
+        "api_base": os.getenv("GLM_API_BASE", "https://open.bigmodel.cn/api/paas/v4"),  # API Base URL
+        "model": os.getenv("GLM_MODEL", "glm-4"),  # 模型名称
         "display_name": "GLM"
     }
 }

@@ -79,7 +79,50 @@ class FileHandlers:
                 contents = await audio_file.read()
                 file_size = len(contents)
                 filepath = self.audio_storage.save_uploaded_file(contents, safe_filename)
-                
+
+                # 音频预处理：转换为16kHz WAV格式（提升转写性能）
+                preprocess_enabled = True
+                try:
+                    from config import AUDIO_PREPROCESS_CONFIG
+                    preprocess_enabled = AUDIO_PREPROCESS_CONFIG.get('enabled', True)
+                except ImportError:
+                    logger.warning("无法导入AUDIO_PREPROCESS_CONFIG，使用默认配置")
+
+                if preprocess_enabled:
+                    try:
+                        from config import AUDIO_PREPROCESS_CONFIG
+                        success, new_filepath, error_msg = self.audio_storage.preprocess_audio_to_16khz(
+                            filepath,
+                            target_sample_rate=AUDIO_PREPROCESS_CONFIG.get('target_sample_rate', 16000),
+                            target_channels=AUDIO_PREPROCESS_CONFIG.get('target_channels', 1),
+                            output_codec=AUDIO_PREPROCESS_CONFIG.get('output_codec', 'pcm_s16le'),
+                            use_gpu_accel=AUDIO_PREPROCESS_CONFIG.get('use_gpu_accel', False)
+                        )
+
+                        if success:
+                            # 预处理成功，更新文件路径和大小
+                            filepath = new_filepath
+                            if os.path.exists(filepath):
+                                file_size = os.path.getsize(filepath)
+                            # 更新文件名（可能从.mp3变成.wav）
+                            safe_filename = os.path.basename(new_filepath)
+                            logger.info(f"音频预处理成功: {audio_file.filename} -> {safe_filename}")
+                        else:
+                            # 预处理失败，根据配置决定是否继续
+                            fallback_on_error = AUDIO_PREPROCESS_CONFIG.get('fallback_on_error', True)
+                            if fallback_on_error:
+                                logger.warning(f"音频预处理失败（将使用原文件）: {error_msg}")
+                                # 继续使用原文件
+                            else:
+                                # 不允许降级，抛出错误
+                                raise Exception(f"音频预处理失败: {error_msg}")
+                    except Exception as e:
+                        logger.error(f"音频预处理异常: {e}")
+                        # 根据配置决定是否继续
+                        fallback_on_error = AUDIO_PREPROCESS_CONFIG.get('fallback_on_error', True) if 'AUDIO_PREPROCESS_CONFIG' in dir() else True
+                        if not fallback_on_error:
+                            raise
+
                 file_id = str(uuid.uuid4())
                 
                 file_info = {

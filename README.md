@@ -98,14 +98,29 @@ voice/
 │   ├── audio_io/       # 音频存储管理
 │   │   └── storage.py
 │   ├── runners/        # 模型运行器
-│   │   ├── asr_runner.py           # ASR 模型运行器
-│   │   └── diarization_runner.py   # 声纹分离运行器
-│   └── websocket/      # WebSocket 连接管理
-│       └── connection_manager.py
+│   │   ├── asr_runner_funasr.py    # ASR 模型运行器（FunASR）
+│   │   └── model_pool.py            # 模型池管理
+│   ├── websocket/      # WebSocket 连接管理
+│   │   └── connection_manager.py
+│   ├── monitoring/      # 监控和指标
+│   │   ├── dify_webhook_sender.py  # Dify Webhook 报警
+│   │   ├── metrics.py              # 系统指标
+│   │   └── prometheus_metrics.py   # Prometheus 指标
+│   ├── middleware/     # 中间件
+│   │   └── rate_limiter.py
+│   ├── cache/          # 缓存
+│   └── repos/          # 数据仓库（预留）
 │
 ├── api/                # API 层：对外接口
 │   └── routers/
-│       └── voice_gateway.py        # 语音服务网关
+│       ├── voice_gateway.py        # 语音服务网关（主路由定义）
+│       ├── file_handlers.py        # 文件处理（上传、下载、删除）
+│       ├── file_manager.py         # 线程安全的文件管理器
+│       ├── history_manager.py      # 历史记录管理（加载、保存）
+│       ├── transcription_service.py # 转写服务（转写任务管理）
+│       ├── summary_generator.py    # 会议纪要生成服务
+│       ├── document_generator.py   # Word 文档生成（转写文档、会议纪要）
+│       └── utils.py                # 工具函数（WebSocket、文件验证等）
 │
 ├── templates/          # 前端模板
 │   ├── index.html      # 主页面
@@ -115,6 +130,7 @@ voice/
 ├── uploads/            # 文件上传目录
 ├── transcripts/        # 转写结果目录
 ├── audio_temp/         # 临时音频文件
+├── meeting_summaries/   # 会议纪要存储目录
 │
 ├── main.py             # 应用入口
 └── config.py           # 配置文件
@@ -126,6 +142,59 @@ voice/
 - **Application（应用层）**：编排业务流程，协调领域对象
 - **Infrastructure（基础设施层）**：提供技术支持（数据库、文件系统、第三方服务等）
 - **API（接口层）**：处理 HTTP 请求，调用应用层服务
+
+### 模块化设计
+
+项目采用模块化设计，将功能拆分到独立模块：
+
+#### API 层模块说明
+
+- **`voice_gateway.py`**：主路由定义文件，包含所有 API 端点的路由定义
+  - 负责路由注册和请求分发
+  - 初始化各个服务模块
+  - 处理 WebSocket 连接
+
+- **`file_handlers.py`**：文件处理模块
+  - 文件上传（支持多文件）
+  - 文件下载（音频、转写文档、会议纪要）
+  - 文件删除（单个文件、清空所有历史）
+  - 集成 Dify Webhook 事件通知
+
+- **`file_manager.py`**：线程安全的文件管理器
+  - 使用递归锁（RLock）保证线程安全
+  - 管理文件信息（上传、处理中、已完成、错误）
+  - 提供文件查询、更新、删除接口
+
+- **`transcription_service.py`**：转写服务模块
+  - 管理转写任务的执行
+  - 支持任务取消（真正的进程中断）
+  - 处理转写进度更新
+  - 保存转写结果和历史记录
+
+- **`history_manager.py`**：历史记录管理
+  - 从磁盘加载历史记录（JSON 格式）
+  - 保存历史记录到磁盘
+  - 支持历史记录的持久化存储
+
+- **`summary_generator.py`**：会议纪要生成服务
+  - 集成 DeepSeek/Qwen/GLM 等 AI 模型
+  - 支持自定义提示词模板
+  - 自动清理 AI 返回的格式和确认消息
+  - 生成默认统计型纪要（无 API 密钥时）
+
+- **`document_generator.py`**：Word 文档生成
+  - 生成转写文档（包含说话人、时间戳、文本）
+  - 生成会议纪要文档
+  - 支持中英文格式
+  - 自动格式化（标题、段落、表格等）
+
+- **`utils.py`**：工具函数
+  - WebSocket 消息发送（同步代码中调用异步函数）
+  - 文件格式验证（allowed_file）
+  - 转写结果清理（clean_transcript_words）
+  - 主事件循环管理
+
+这种模块化设计提高了代码的可维护性、可测试性和可扩展性。
 
 ## 🚀 快速开始
 
@@ -632,6 +701,18 @@ AUDIO_PROCESS_CONFIG = {
     "sample_rate": 16000,  # 采样率
     "channels": 1          # 声道数
 }
+
+# 音频预处理配置（上传时预处理）
+AUDIO_PREPROCESS_CONFIG = {
+    "enabled": True,              # 是否启用上传时预处理
+    "replace_original": True,      # 是否替换原文件
+    "target_sample_rate": 16000,  # 目标采样率
+    "target_channels": 1,         # 目标声道数
+    "output_format": "wav",       # 输出格式
+    "output_codec": "pcm_s16le",  # 输出编码
+    "use_gpu_accel": False,       # 是否使用GPU加速
+    "fallback_on_error": True     # 预处理失败时保留原文件
+}
 ```
 
 #### AI 模型 API 配置（用于生成会议纪要）
@@ -678,6 +759,12 @@ AI_MODEL_CONFIG = {
 | `GLM_API_BASE` | GLM API 地址 | https://open.bigmodel.cn/api/paas/v4 |
 | `PRELOAD_MODELS` | 启动时预加载模型 | false |
 | `TRANSCRIBE_WORKERS` | 转写线程数 | 5 |
+| `AUDIO_PREPROCESS_ENABLED` | 是否启用上传时音频预处理 | true |
+| `AUDIO_PREPROCESS_GPU` | 是否使用GPU加速预处理 | false |
+| `DIFY_API_KEY` | Dify API 密钥（可选） | - |
+| `DIFY_BASE_URL` | Dify API 地址（可选） | - |
+| `DIFY_WORKFLOW_ID` | Dify 工作流 ID（可选） | - |
+| `DIFY_USER_ID` | Dify 用户 ID（可选） | - |
 
 ## 🛠️ 技术栈
 
@@ -774,7 +861,112 @@ export GLM_API_KEY="your-api-key"
 
 如果未配置 API 密钥，系统会生成默认的统计型纪要。
 
+#### 6. Docker 容器健康检查失败
+
+如果 Docker 容器显示为 `unhealthy`：
+
+1. **检查健康检查响应**：
+   ```bash
+   docker exec audio-transcription-service curl http://localhost:8998/healthz
+   ```
+
+2. **常见原因**：
+   - 模型池未初始化（延迟加载模式，首次请求时加载）
+   - 存储空间不足
+   - FFmpeg 不可用
+   - 系统资源不足（内存/CPU）
+
+3. **解决方案**：
+   - 模型未加载是正常状态（延迟加载），不影响服务功能
+   - 检查存储空间和系统资源
+   - 确保 FFmpeg 已正确安装
+
+#### 7. Docker 环境变量未生效
+
+如果修改 `.env` 文件后环境变量未生效：
+
+1. **确保从项目根目录运行**：
+   ```bash
+   cd /home/lizhipeng/work/nvoice/phosys
+   docker compose -f docker/docker-compose.yml down
+   docker compose -f docker/docker-compose.yml up -d
+   ```
+
+2. **检查 `.env` 文件位置**：
+   - `.env` 文件必须在项目根目录
+   - `docker-compose.yml` 使用 `../.env` 路径（相对于 docker 目录）
+
+3. **验证环境变量**：
+   ```bash
+   docker exec audio-transcription-service env | grep DIFY
+   ```
+
 ## 📝 更新日志
+
+### v3.1.6-FunASR (2025-12-29)
+
+**配置简化与性能优化**
+
+#### 配置简化
+- ✅ **移除环境区分**：移除 development/staging/production 环境区分，统一使用简化配置
+  - `config.py` 不再根据 `ENVIRONMENT` 环境变量加载不同配置
+  - Docker 配置移除 `ENVIRONMENT` 环境变量
+  - 简化部署流程，减少配置错误
+- ✅ **简化配置加载**：直接使用 `load_dotenv()` 加载环境变量
+- ✅ **AI模型配置优化**：为 DeepSeek/Qwen/GLM 添加默认 API 地址和模型名称
+  - 只需配置 API Key 即可使用，无需配置 API Base URL 和模型名称
+
+#### 新增功能
+- ✅ **热词 API 传入**：热词参数优先从 API 请求中传入，未传入时从 config.py 读取
+  - 支持在 `/api/voice/transcribe` 和 `/api/voice/files/{file_id}` 接口中传入 `hotword` 参数
+  - 方便工作流工具（如 Dify）动态指定热词
+- ✅ **音频预处理优化**：上传时自动预处理音频为 16kHz WAV 格式
+  - 提升转写性能和准确率
+  - 支持配置开关、GPU 加速、失败降级等选项
+  - 自动检测已预处理文件并跳过转换
+- ✅ **会议纪要大纲**：会议纪要模板新增"大纲"字段
+  - 自动生成约 200 字的会议概要
+
+#### 代码精简
+- ✅ **移除热词管理 API**：删除 `GET/POST/DELETE /api/voice/hotwords` 接口
+  - 热词直接从 config.py 配置或 API 传入
+- ✅ **简化文本处理器**：`text_processor.py` 移除同义词配置文件加载功能
+  - 使用内置同义词映射，减少外部依赖
+
+#### 技术改进
+- ✅ 优化 `audio_processor.py`：添加格式检查，检测已预处理文件可跳过 FFmpeg 转换
+- ✅ 优化 `storage.py`：添加 `preprocess_audio_to_16khz` 方法
+- ✅ 简化并发配置：移除基于环境的配置切换，使用固定的生产级配置
+
+---
+
+### v3.1.5-FunASR (2025-12-24)
+
+**健康检查与 Docker 配置优化**
+
+#### 功能修复
+- ✅ **健康检查字段名修复**：修复了模型池统计字段名不匹配问题（`available_count` 和 `current_size`）
+  - 修复前：使用错误的字段名 `available` 和 `pool_size`，导致健康检查总是返回 503
+  - 修复后：使用正确的字段名 `available_count` 和 `current_size`，健康检查正常工作
+- ✅ **延迟加载模式优化**：模型未加载不再影响健康检查状态
+  - 模型未加载是正常状态（延迟加载），不影响服务健康状态
+  - 只有在模型加载后池不可用时才标记为不健康
+- ✅ **Dify 服务可选化**：Dify Webhook 服务作为可选服务，不影响整体健康状态
+  - Dify 连接失败不会导致服务标记为不健康
+  - 添加了明确的提示信息，说明 Dify 是可选服务
+
+#### Docker 配置优化
+- ✅ **环境变量加载修复**：修复了 Docker Compose 中 `DIFY_BASE_URL` 环境变量加载问题
+  - 修复前：`docker-compose.yml` 中的默认值会覆盖 `.env` 文件中的配置
+  - 修复后：`DIFY_BASE_URL` 完全从 `.env` 文件加载，确保配置正确
+- ✅ **健康检查配置优化**：调整了 Docker 健康检查参数
+  - 检查间隔：30秒 → 1小时（降低检查频率）
+  - 启动等待期：60秒 → 120秒（确保存储初始化完成）
+
+#### 技术改进
+- ✅ 优化了健康检查逻辑，支持延迟加载模式
+- ✅ 改进了 Docker 环境变量配置，确保 `.env` 文件正确加载
+- ✅ 增强了错误处理和日志记录
 
 ### v3.1.4-FunASR (2025-12-18)
 

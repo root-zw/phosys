@@ -56,8 +56,7 @@ RUN mkdir -p uploads transcripts audio_temp meeting_summaries && \
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    ENVIRONMENT=production
+    PYTHONDONTWRITEBYTECODE=1
 
 # 暴露端口
 EXPOSE 8998

@@ -98,6 +98,7 @@ def generate_meeting_summary(transcript_data, custom_prompt=None, model=None):
 主持人：[从转录中识别主持人]
 参会人数：[统计参与会议的总人数]
 关键词：[会议纪要关键词]
+大纲:[用200字左右阐述会议概要]
 
 一、会议议题及讨论内容
 二、行动清单（待办事项）

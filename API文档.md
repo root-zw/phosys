@@ -1,7 +1,7 @@
 # 音频转写系统 API 接口文档
 
-> 版本: 3.1.4-FunASR  
-> 更新时间: 2025-12-18  
+> 版本: 3.1.6-FunASR
+> 更新时间: 2025-12-29
 > 基础URL: `http://localhost:8998`
 
 ---
@@ -26,7 +26,20 @@
 
 ## 概述
 
-音频转写系统提供了一套完整的RESTful API，支持音频文件上传、语音识别、声纹分离、会议纪要生成等功能。系统采用领域驱动设计（DDD）架构，具有高性能和可扩展性。
+音频转写系统提供了一套完整的RESTful API，支持音频文件上传、语音识别、声纹分离、会议纪要生成等功能。系统采用领域驱动设计（DDD）三层架构，具有高性能和可扩展性。
+
+### 系统架构
+
+项目采用模块化设计，API 层包含以下模块：
+
+- **`voice_gateway.py`**：主路由定义文件，包含所有 API 端点的路由定义
+- **`file_handlers.py`**：文件处理模块（上传、下载、删除）
+- **`file_manager.py`**：线程安全的文件管理器
+- **`history_manager.py`**：历史记录管理（加载、保存）
+- **`transcription_service.py`**：转写服务（转写任务管理）
+- **`summary_generator.py`**：会议纪要生成服务
+- **`document_generator.py`**：Word 文档生成（转写文档、会议纪要）
+- **`utils.py`**：工具函数（WebSocket、文件验证等）
 
 ### 核心功能
 
@@ -1182,18 +1195,105 @@ asyncio.run(connect_websocket())
 
 #### GET `/healthz`
 
-**功能**：健康检查。
+**功能**：详细健康检查，检查系统各组件状态。
 
 **请求方式**：`GET`
 
-**响应示例**：
+**检查内容**：
+
+1. **模型加载状态**（延迟加载模式）
+   - 模型是否已加载（未加载是正常状态，不影响健康）
+   - 模型池可用实例数（`available_count`）
+   - 模型池总大小（`current_size`）
+   - **注意**：模型未加载不影响健康状态，系统采用延迟加载模式
+
+2. **存储空间**
+   - 上传目录（uploads）
+   - 转写输出目录（transcripts）
+   - 临时文件目录（audio_temp）
+   - 会议纪要目录（meeting_summaries）
+   - 每个目录的：存在性、可写性、总容量、可用空间、使用百分比
+
+3. **系统资源**
+   - CPU 使用率
+   - 内存使用率
+   - 可用内存
+
+4. **依赖服务**
+   - Dify Webhook 服务可用性（**可选服务**，不影响整体健康状态）
+   - FFmpeg 是否可用（必需服务）
+
+**响应示例（健康）**：
 
 ```json
 {
-  "status": "ok",
-  "version": "3.1.4-FunASR"
+  "status": "healthy",
+  "version": "3.1.5-FunASR",
+  "checks": {
+    "models": {
+      "status": "healthy",
+      "loaded": true,
+      "pool_available": 2,
+      "pool_size": 2
+    },
+    "storage": {
+      "uploads": {
+        "exists": true,
+        "writable": true,
+        "total_gb": 500.0,
+        "free_gb": 450.0,
+        "used_percent": 10.0,
+        "status": "healthy"
+      },
+      "transcripts": { ... },
+      "temp": { ... },
+      "summaries": { ... }
+    },
+    "system": {
+      "cpu_percent": 25.5,
+      "memory_percent": 45.2,
+      "memory_available_gb": 8.5,
+      "status": "healthy"
+    },
+    "dify": {
+      "configured": true,
+      "available": true,
+      "status": "healthy",
+      "message": "Dify is optional - service will work without it"
+    },
+    "ffmpeg": {
+      "available": true,
+      "status": "healthy"
+    }
+  }
 }
 ```
+
+**响应示例（模型未加载 - 正常状态）**：
+
+```json
+{
+  "status": "healthy",
+  "version": "3.1.5-FunASR",
+  "checks": {
+    "models": {
+      "status": "not_loaded",
+      "loaded": false,
+      "message": "Models will be loaded on first request (lazy loading)"
+    },
+    ...
+  }
+}
+```
+
+**HTTP 状态码**：
+- `200 OK`：服务健康（包括模型未加载的情况）
+- `503 Service Unavailable`：关键组件失败（FFmpeg 不可用、存储空间不足、系统资源不足等）
+
+**重要说明**：
+- 模型未加载是正常状态（延迟加载模式），不影响服务健康状态
+- Dify 服务是可选服务，未配置或连接失败不影响整体健康状态
+- 只有关键组件（FFmpeg、存储空间、系统资源）失败才会返回 503
 
 ---
 
@@ -1209,7 +1309,7 @@ asyncio.run(connect_websocket())
 {
   "success": true,
   "system": "running",
-  "version": "3.1.4-FunASR",
+  "version": "3.1.5-FunASR",
   "models_loaded": true
 }
 ```
@@ -1754,9 +1854,105 @@ function connectWebSocket() {
 - Swagger UI: http://localhost:8998/docs
 - ReDoc: http://localhost:8998/redoc
 
+### Q8: Docker 容器健康检查失败
+
+如果 Docker 容器显示为 `unhealthy`：
+
+1. **检查健康检查响应**：
+   ```bash
+   docker exec audio-transcription-service curl http://localhost:8998/healthz
+   ```
+
+2. **常见原因**：
+   - 模型池未初始化（延迟加载模式，首次请求时加载）- **这是正常状态**
+   - 存储空间不足
+   - FFmpeg 不可用
+   - 系统资源不足
+
+3. **解决方案**：
+   - 模型未加载是正常状态（延迟加载），不影响服务功能
+   - 检查存储空间和系统资源
+   - 确保 FFmpeg 已正确安装
+
+### Q9: Docker 环境变量未生效
+
+如果修改 `.env` 文件后环境变量未生效：
+
+1. **确保从项目根目录运行**：
+   ```bash
+   cd /home/lizhipeng/work/nvoice/phosys
+   docker compose -f docker/docker-compose.yml down
+   docker compose -f docker/docker-compose.yml up -d
+   ```
+
+2. **检查 `.env` 文件位置**：
+   - `.env` 文件必须在项目根目录
+   - `docker-compose.yml` 使用 `../.env` 路径（相对于 docker 目录）
+
+3. **验证环境变量**：
+   ```bash
+   docker exec audio-transcription-service env | grep DIFY
+   ```
+
+**重要提示**：
+- 修改 `.env` 文件后不需要重新构建镜像，只需重启容器
+- 确保从项目根目录运行 Docker Compose 命令
+
 ---
 
 ## 更新日志
+
+### v3.1.6-FunASR (2025-12-29)
+
+**配置简化与性能优化**
+
+#### 配置简化
+- ✅ **移除环境区分**：移除 development/staging/production 环境区分，统一使用简化配置
+  - `config.py` 不再根据 `ENVIRONMENT` 环境变量加载不同配置
+  - Docker 配置移除 `ENVIRONMENT` 环境变量
+- ✅ **AI模型配置优化**：为 DeepSeek/Qwen/GLM 添加默认 API 地址和模型名称
+
+#### 新增功能
+- ✅ **热词 API 传入**：热词参数优先从 API 请求中传入，未传入时从 config.py 读取
+  - 支持在 `/api/voice/transcribe` 和 `PATCH /api/voice/files/{file_id}` 接口中传入 `hotword` 参数
+- ✅ **音频预处理**：上传时自动预处理音频为 16kHz WAV 格式
+  - 提升转写性能和准确率
+  - 可通过 `AUDIO_PREPROCESS_ENABLED` 环境变量开关
+- ✅ **会议纪要大纲**：会议纪要模板新增"大纲"字段
+
+#### 接口变更
+- ✅ **移除热词管理 API**：删除 `GET/POST/DELETE /api/voice/hotwords` 接口
+  - 热词直接从 config.py 配置或 API 传入
+
+---
+
+### v3.1.5-FunASR (2025-12-24)
+
+**健康检查与 Docker 配置优化**
+
+#### 功能修复
+- ✅ **健康检查字段名修复**：修复了模型池统计字段名不匹配问题（`available_count` 和 `current_size`）
+  - 修复前：使用错误的字段名 `available` 和 `pool_size`，导致健康检查总是返回 503
+  - 修复后：使用正确的字段名 `available_count` 和 `current_size`，健康检查正常工作
+- ✅ **延迟加载模式优化**：模型未加载不再影响健康检查状态
+  - 模型未加载是正常状态（延迟加载），不影响服务健康状态
+  - 只有在模型加载后池不可用时才标记为不健康
+- ✅ **Dify 服务可选化**：Dify Webhook 服务作为可选服务，不影响整体健康状态
+  - Dify 连接失败不会导致服务标记为不健康
+  - 添加了明确的提示信息，说明 Dify 是可选服务
+
+#### Docker 配置优化
+- ✅ **环境变量加载修复**：修复了 Docker Compose 中 `DIFY_BASE_URL` 环境变量加载问题
+  - 修复前：`docker-compose.yml` 中的默认值会覆盖 `.env` 文件中的配置
+  - 修复后：`DIFY_BASE_URL` 完全从 `.env` 文件加载，确保配置正确
+- ✅ **健康检查配置优化**：调整了 Docker 健康检查参数
+  - 检查间隔：30秒 → 1小时（降低检查频率）
+  - 启动等待期：60秒 → 120秒（确保存储初始化完成）
+
+#### 技术改进
+- ✅ 优化了健康检查逻辑，支持延迟加载模式
+- ✅ 改进了 Docker 环境变量配置，确保 `.env` 文件正确加载
+- ✅ 增强了错误处理和日志记录
 
 ### v3.1.4-FunASR (2025-12-18)
 

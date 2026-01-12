@@ -133,11 +133,7 @@ class PipelineService:
             sample_rate=audio_config.get('sample_rate', 16000),
             use_gpu_accel=True
         )
-        # 初始化文本处理器，支持从配置文件加载同义词映射
-        hotword_synonym_config = MODEL_CONFIG.get('hotword_synonym_config', '')
-        self.text_processor = TextProcessor(
-            hotword_synonym_config_path=hotword_synonym_config if hotword_synonym_config else None
-        )
+        self.text_processor = TextProcessor()
         self.diarization_processor = DiarizationProcessor()
     
     def set_callback(self, callback: Callable):
