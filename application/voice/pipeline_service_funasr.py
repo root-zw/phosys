@@ -10,7 +10,7 @@ from domain.voice.text_processor import TextProcessor
 from domain.voice.diarization import DiarizationProcessor
 from infra.audio_io.storage import AudioStorage
 from infra.runners.asr_runner_funasr import ASRRunner
-from config import MODEL_CONFIG
+from config import MODEL_CONFIG, TEXT_POSTPROCESS_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -252,19 +252,94 @@ class PipelineService:
             for entry in merged_transcript:
                 if 'text' in entry:
                     original_text = entry['text']
-                    fixed_text = self.text_processor.fix_transcript_text(original_text)
+                    # 有词级时间戳时，为保证逐词高亮对齐：
+                    # - 只做尾部标点修复（不做句中去叠词/口吃清理，避免 words 与 text 不一致）
+                    has_words = bool(entry.get("words"))
+                    fixed_text = self.text_processor.fix_transcript_text(
+                        original_text,
+                        remove_repetitions=not has_words,
+                    )
                     
-                    # 如果文本被修改（例如去掉了末尾逗号），需要同步更新words数组
-                    if fixed_text != original_text and 'words' in entry and entry['words']:
-                        # 重新生成words数组，确保与修复后的文本一致
-                        entry['words'] = self.asr_runner._extract_word_timestamps(
-                            None, 
-                            entry.get('start_time', 0), 
-                            entry.get('end_time', 0), 
-                            fixed_text
-                        )
+                    # 如果文本被修改，同步更新words数组
+                    # 保留原始的FunASR时间戳，只调整末尾的标点
+                    if fixed_text != original_text and 'words' in entry and entry['words'] and self.text_processor.is_tail_only_change(original_text, fixed_text):
+                        words = entry['words']
+                        if words:
+                            orig_len = len(original_text)
+                            fixed_len = len(fixed_text)
+                            
+                            if fixed_len < orig_len:
+                                # 文本变短：从末尾移除对应数量的词条目
+                                chars_removed = orig_len - fixed_len
+                                while chars_removed > 0 and words:
+                                    last_word = words[-1]
+                                    word_len = len(last_word.get('text', ''))
+                                    if word_len <= chars_removed:
+                                        chars_removed -= word_len
+                                        words.pop()
+                                    else:
+                                        break
+                            elif fixed_len > orig_len:
+                                # 文本变长（添加了标点）：在末尾添加一个标点词条目
+                                added_chars = fixed_text[orig_len:]  # 新增的字符
+                                if words:
+                                    last_time = words[-1].get('end', entry.get('end_time', 0))
+                                    words.append({'text': added_chars, 'start': last_time, 'end': last_time})
+                            else:
+                                # 长度相同（替换了标点）：更新最后一个词的文本
+                                # 找到被替换的字符位置
+                                for i in range(min(orig_len, fixed_len)):
+                                    if i < orig_len and i < fixed_len and original_text[-(i+1)] != fixed_text[-(i+1)]:
+                                        # 找到被替换的位置，更新words末尾
+                                        if words and words[-1].get('text', '') == original_text[-(i+1)]:
+                                            words[-1]['text'] = fixed_text[-(i+1)]
+                                        break
+                            
+                            entry['words'] = words
                     
                     entry['text'] = fixed_text
+
+                    # ✅ 可选：进一步文本质量后处理（叠词/脏话等）
+                    # 目标：过滤后仍逐词高亮且一致
+                    # - 有 words：优先在 words 上做过滤，并由 words 重建 text（不再移除 words）
+                    # - 无 words：才在 text 上做后处理
+                    if TEXT_POSTPROCESS_CONFIG.get("enabled", True):
+                        profanity_cfg = TEXT_POSTPROCESS_CONFIG.get("profanity", {}) or {}
+                        profanity_words = None
+                        if profanity_cfg.get("enabled", False):
+                            profanity_words = profanity_cfg.get("words") or []
+
+                        # 先做 word-level 去口吃/叠词（保持逐词高亮一致）
+                        if entry.get("words") and TEXT_POSTPROCESS_CONFIG.get("remove_repetitions", True):
+                            new_words, changed = self.text_processor.remove_repetitions_in_words(entry["words"])
+                            if changed:
+                                entry["words"] = new_words
+                                entry["text"] = "".join((w.get("text", "") or "") for w in new_words)
+
+                        if entry.get("words") and profanity_words:
+                            new_words, hit = self.text_processor.filter_profanity_in_words(
+                                entry["words"],
+                                profanity_words=profanity_words,
+                                action=profanity_cfg.get("action", "mask"),
+                                mask_char=profanity_cfg.get("mask_char", "*"),
+                                replacement=profanity_cfg.get("replacement", "[不当内容已处理]"),
+                                match_mode=profanity_cfg.get("match_mode", "substring"),
+                            )
+                            if hit:
+                                entry["words"] = new_words
+                                entry["text"] = "".join((w.get("text", "") or "") for w in new_words)
+                        else:
+                            processed_text, meta = self.text_processor.post_process_text(
+                                entry.get("text", ""),
+                                remove_repetitions=TEXT_POSTPROCESS_CONFIG.get("remove_repetitions", True),
+                                profanity_words=profanity_words,
+                                profanity_action=profanity_cfg.get("action", "mask"),
+                                profanity_mask_char=profanity_cfg.get("mask_char", "*"),
+                                profanity_replacement=profanity_cfg.get("replacement", "[不当内容已处理]"),
+                                profanity_match_mode=profanity_cfg.get("match_mode", "substring"),
+                            )
+                            if meta.get("changed") and processed_text != entry.get("text", ""):
+                                entry["text"] = processed_text
             tracker.complete_phase() # 瞬间补齐到 95%
 
             # =================================================

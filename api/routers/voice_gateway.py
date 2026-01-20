@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Optional, List
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, FileResponse
 
 from application.voice.pipeline_service_funasr import PipelineService
@@ -103,17 +103,51 @@ def init_voice_gateway(service: PipelineService, storage: AudioStorage):
     load_history_from_file(uploaded_files_manager)
 
 
+def _extract_user(request: Request, explicit_user: Optional[str] = None, body: Optional[dict] = None) -> Optional[str]:
+    """
+    提取 user 标识（用于多用户隔离历史记录）
+    支持来源优先级：
+    - 显式参数（query/form 等）
+    - JSON body.user
+    - Header: X-User
+    - Query: user
+    """
+    if explicit_user and explicit_user.strip():
+        return explicit_user.strip()
+    if body and isinstance(body, dict):
+        body_user = body.get('user')
+        if isinstance(body_user, str) and body_user.strip():
+            return body_user.strip()
+    header_user = request.headers.get('X-User')
+    if header_user and header_user.strip():
+        return header_user.strip()
+    query_user = request.query_params.get('user')
+    if query_user and query_user.strip():
+        return query_user.strip()
+    return None
+
+
+def _normalize_user(user: Optional[str]) -> str:
+    return (user or '').strip() or 'anonymous'
+
+
+def _file_belongs_to_user(file_info: dict, user: str) -> bool:
+    return _normalize_user(file_info.get('user')) == _normalize_user(user)
+
+
 
 # ==================== RESTful文件资源接口 ====================
 
 @router.get("/files")
 async def list_all_files(
+    request: Request,
     filepath: Optional[str] = None,
     status: Optional[str] = None,
     limit: Optional[int] = None,
     offset: int = 0,
     include_history: bool = False,
-    download: int = 0
+    download: int = 0,
+    user: Optional[str] = None
 ):
     """
     📋 列出所有文件（RESTful风格，方案2优化）
@@ -170,8 +204,13 @@ async def list_all_files(
         if include_history:
             load_history_from_file(uploaded_files_manager)
         
+        effective_user = _extract_user(request, explicit_user=user)
+
         # 获取所有文件
         all_files = uploaded_files_manager.get_all_files()
+        # 传了 user 才按 user 隔离；不传保持原行为（返回所有）
+        if effective_user:
+            all_files = [f for f in all_files if _file_belongs_to_user(f, effective_user)]
         
         # 根据状态过滤
         if status:
@@ -239,8 +278,10 @@ async def list_all_files(
 @router.get("/files/{file_id}")
 async def get_file_detail(
     file_id: str,
+    request: Request,
     include_transcript: bool = False,
-    include_summary: bool = False
+    include_summary: bool = False,
+    user: Optional[str] = None
 ):
     """
     📄 获取文件详情（RESTful风格，方案2优化）
@@ -259,6 +300,11 @@ async def get_file_detail(
         
         if not file_info:
             raise HTTPException(status_code=404, detail='文件不存在')
+
+        # 传了 user 时才做鉴权（不传 user 保持旧行为）
+        effective_user = _extract_user(request, explicit_user=user)
+        if effective_user and not _file_belongs_to_user(file_info, effective_user):
+            raise HTTPException(status_code=403, detail='无权访问该文件')
         
         # 构建基本响应
         result = {
@@ -419,7 +465,11 @@ async def update_file(file_id: str, request: Request):
 # ==================== 原有接口（保持向后兼容） ====================
 
 @router.post("/upload")
-async def upload_audio(audio_files: List[UploadFile] = File(..., alias="audio_file")):
+async def upload_audio(
+    request: Request,
+    audio_files: List[UploadFile] = File(..., alias="audio_file"),
+    user: Optional[str] = Form(None)
+):
     """
     上传音频文件（支持单个或多个文件）
     
@@ -436,8 +486,9 @@ async def upload_audio(audio_files: List[UploadFile] = File(..., alias="audio_fi
     """
     if not file_handlers:
         raise HTTPException(status_code=500, detail="文件处理器未初始化")
-    
-    result = await file_handlers.upload_files(audio_files)
+
+    effective_user = _extract_user(request, explicit_user=user)
+    result = await file_handlers.upload_files(audio_files, user=effective_user)
     
     # 根据结果返回适当的 HTTP 状态码
     if not result.get('success'):
@@ -454,6 +505,7 @@ async def transcribe(request: Request):
     
     try:
         body = await request.json()
+        effective_user = _extract_user(request, body=body)
         
         # ✅ 兼容模式：同时支持 file_id (单个) 和 file_ids (数组)
         file_ids = body.get('file_ids', [])
@@ -518,6 +570,15 @@ async def transcribe(request: Request):
     
     if not transcription_service:
         raise HTTPException(status_code=500, detail="转写服务未初始化")
+
+    # 传了 user 时才做鉴权（不传 user 保持旧行为）
+    if effective_user:
+        for fid in file_ids:
+            fi = uploaded_files_manager.get_file(fid)
+            if not fi:
+                return JSONResponse({'success': False, 'message': f'文件ID {fid} 不存在'}, status_code=404)
+            if not _file_belongs_to_user(fi, effective_user):
+                return JSONResponse({'success': False, 'message': '无权操作该文件'}, status_code=403)
     
     # 调用转写服务
     result = transcription_service.start_transcription(
@@ -646,7 +707,7 @@ async def get_result(file_id: str):
 
 
 @router.get("/history")
-async def list_history():
+async def list_history(request: Request, user: Optional[str] = None):
     """
     📜 获取历史记录（向后兼容接口）
     
@@ -654,10 +715,12 @@ async def list_history():
     """
     # 从文件加载历史记录
     load_history_from_file(uploaded_files_manager)
+
+    effective_user = _extract_user(request, explicit_user=user)
     
     history_records = []
     for f in uploaded_files_manager.get_all_files():
-        if f['status'] == 'completed':
+        if f['status'] == 'completed' and (not effective_user or _file_belongs_to_user(f, effective_user)):
             transcript_data = f.get('transcript_data', [])
             speakers = set(t.get('speaker', '') for t in transcript_data if t.get('speaker'))
             
@@ -683,7 +746,7 @@ async def list_history():
 
 
 @router.delete("/files/{file_id}")
-async def delete_file(file_id: str):
+async def delete_file(file_id: str, request: Request, user: Optional[str] = None):
     """
     🗑️ 删除文件（RESTful标准接口）
     
@@ -692,9 +755,59 @@ async def delete_file(file_id: str):
     特殊操作：
     - file_id = "_clear_all": 清空所有历史记录，包括所有转写文件以及所有音频
     """
+    effective_user = _extract_user(request, explicit_user=user)
+
     # 特殊操作：清空所有历史记录
     if file_id == "_clear_all":
         try:
+            # 如果提供 user：只清空该 user 的历史（不影响其他用户）
+            if effective_user:
+                deleted_count = 0
+                deleted_audio_count = 0
+                deleted_transcript_count = 0
+                deleted_summary_count = 0
+
+                all_files = uploaded_files_manager.get_all_files()
+                for file_info in all_files:
+                    # 只处理该用户的文件
+                    if not _file_belongs_to_user(file_info, effective_user):
+                        continue
+                    # 跳过正在处理中的文件
+                    if file_info['status'] == 'processing':
+                        continue
+                    try:
+                        # 删除音频文件
+                        if 'filepath' in file_info and os.path.exists(file_info['filepath']):
+                            os.remove(file_info['filepath'])
+                            deleted_audio_count += 1
+                        # 删除转写文档
+                        if file_info.get('transcript_file') and os.path.exists(file_info['transcript_file']):
+                            os.remove(file_info['transcript_file'])
+                            deleted_transcript_count += 1
+                        # 删除会议纪要文档
+                        if file_info.get('summary_file') and os.path.exists(file_info['summary_file']):
+                            os.remove(file_info['summary_file'])
+                            deleted_summary_count += 1
+
+                        uploaded_files_manager.remove_file(file_info['id'])
+                        deleted_count += 1
+                    except Exception as e:
+                        logger.error(f"删除用户历史文件失败 {file_info.get('original_name', 'unknown')}: {e}")
+
+                # 保存更新后的历史记录到磁盘（只保存 remaining completed）
+                save_history_to_file(uploaded_files_manager)
+
+                return {
+                    'success': True,
+                    'message': '清空用户历史记录成功',
+                    'deleted': {
+                        'audio_files': deleted_audio_count,
+                        'transcript_files': deleted_transcript_count,
+                        'summary_files': deleted_summary_count,
+                        'records': deleted_count
+                    }
+                }
+
             deleted_count = 0
             deleted_audio_count = 0
             deleted_transcript_count = 0
@@ -810,6 +923,10 @@ async def delete_file(file_id: str):
     
     if not file_info:
         raise HTTPException(status_code=404, detail='文件不存在')
+
+    # 传了 user 时才做鉴权（不传 user 保持旧行为）
+    if effective_user and not _file_belongs_to_user(file_info, effective_user):
+        raise HTTPException(status_code=403, detail='无权删除该文件')
     
     # ✅ 修复：如果文件正在处理中，但已设置取消标志（停止转写），允许删除
     if file_info['status'] == 'processing' and not file_info.get('_cancelled', False):

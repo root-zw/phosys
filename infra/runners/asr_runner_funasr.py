@@ -129,6 +129,17 @@ class ASRRunner:
         self.model_config = model_config
         self.use_pool = use_pool
         
+        # 加载时间戳校正配置
+        try:
+            from config import TIMESTAMP_CORRECTION_CONFIG
+            self.ts_correction_enabled = TIMESTAMP_CORRECTION_CONFIG.get('enabled', False)
+            self.ts_correction_factor = TIMESTAMP_CORRECTION_CONFIG.get('correction_factor', 1.0)
+            if self.ts_correction_enabled and self.ts_correction_factor != 1.0:
+                logger.info(f"📐 时间戳校正已启用，校正因子: {self.ts_correction_factor}")
+        except ImportError:
+            self.ts_correction_enabled = False
+            self.ts_correction_factor = 1.0
+        
         if use_pool:
             logger.info(f"使用FunASR AutoModel + 模型池模式，池大小: {pool_size}")
             # 创建模型工厂函数
@@ -200,6 +211,9 @@ class ASRRunner:
                 speaker_id_map = {}  # 原始spk -> 连续编号
                 next_speaker_number = 1
                 
+                # 统计时间戳使用情况
+                ts_stats = {'native': 0, 'mapped': 0, 'interpolated': 0}
+                
                 for sentence in result['sentence_info']:
                     original_spk = sentence.get('spk', 0)
                     
@@ -215,8 +229,14 @@ class ASRRunner:
                     start_time = sentence.get('start', 0) / 1000.0  # 转为秒
                     end_time = sentence.get('end', 0) / 1000.0
                     
-                    # 提取词级别时间戳
-                    words = self._extract_word_timestamps(sentence, start_time, end_time, text)
+                    # 应用时间戳校正
+                    if self.ts_correction_enabled:
+                        start_time *= self.ts_correction_factor
+                        end_time *= self.ts_correction_factor
+                    
+                    # 提取词级别时间戳（校正因子会在内部方法中应用）
+                    words, ts_method = self._extract_word_timestamps_with_stats(sentence, start_time, end_time, text)
+                    ts_stats[ts_method] = ts_stats.get(ts_method, 0) + 1
                     
                     transcript_list.append({
                         'text': text,
@@ -226,7 +246,9 @@ class ASRRunner:
                         'words': words  # 词级别时间戳
                     })
                 
+                # 输出时间戳统计
                 logger.info(f"✅ 识别完成: 共{sentence_count}个句子, {len(speaker_id_map)}位说话人")
+                logger.info(f"📊 时间戳来源: 原生={ts_stats.get('native', 0)}, 映射={ts_stats.get('mapped', 0)}, 插值={ts_stats.get('interpolated', 0)}")
             elif 'text' in result:
                 # 只有文本，没有说话人信息
                 logger.warning("⚠️ 结果中无说话人信息，作为单人处理")
@@ -246,97 +268,244 @@ class ASRRunner:
             logger.error(f"❌ FunASR转写失败: {e}")
             raise
     
-    def _extract_word_timestamps(self, sentence: Dict, start_time: float, end_time: float, text: str) -> List[Dict]:
+    def _extract_word_timestamps_with_stats(self, sentence: Dict, start_time: float, end_time: float, text: str) -> tuple:
         """
-        提取词级别时间戳
+        提取词级别时间戳，并返回使用的方法
         
-        Args:
-            sentence: FunASR句子信息（可能包含词级别时间戳）
-            start_time: 句子开始时间（秒）
-            end_time: 句子结束时间（秒）
-            text: 句子文本
-            
         Returns:
-            List[Dict]: 词级别时间戳列表，每项包含 {'text': str, 'start': float, 'end': float}
+            tuple: (词列表, 方法名称) - 方法名称为 'native', 'mapped', 'interpolated'
         """
+        words, method = self._extract_word_timestamps_internal(sentence, start_time, end_time, text)
+        return words, method
+    
+    def _extract_word_timestamps(self, sentence: Dict, start_time: float, end_time: float, text: str) -> List[Dict]:
+        """提取词级别时间戳（兼容旧接口）"""
+        words, _ = self._extract_word_timestamps_internal(sentence, start_time, end_time, text)
+        return words
+    
+    def _extract_word_timestamps_internal(self, sentence: Dict, start_time: float, end_time: float, text: str) -> tuple:
+        """
+        提取词级别时间戳（智能版：超长句子按句号拆分子句，每个子句独立计算时间戳）
+        
+        Returns:
+            tuple: (词列表, 方法名称)
+        """
+        import jieba
+        import re
+        
         words = []
         
-        # 方法1: 尝试从FunASR结果中提取词级别时间戳
+        # 获取时间戳校正因子
+        ts_factor = self.ts_correction_factor if self.ts_correction_enabled else 1.0
+        
+        # 方法1: 尝试从FunASR结果中提取 timestamp 字段（字级别时间戳）
+        if sentence and 'timestamp' in sentence:
+            timestamp_list = sentence.get('timestamp', [])
+            text_chars = list(text) if text else []
+            
+            if timestamp_list and len(timestamp_list) == len(text_chars):
+                # 时间戳数量与字符数量匹配，直接使用
+                for i, (char, ts) in enumerate(zip(text_chars, timestamp_list)):
+                    if isinstance(ts, (list, tuple)) and len(ts) >= 2:
+                        char_start = (ts[0] / 1000.0) * ts_factor
+                        char_end = (ts[1] / 1000.0) * ts_factor
+                        words.append({'text': char, 'start': char_start, 'end': char_end})
+                
+                if words:
+                    return words, 'native'
+                    
+            elif timestamp_list:
+                # FunASR的timestamp不包含标点符号，需要映射
+                PUNCTUATION_SET = set('，。！？、；：""''（）【】《》—…·,.!?;:\'"()[]<>-–—')
+                
+                char_info = []
+                ts_idx = 0
+                for char in text_chars:
+                    is_punct = char in PUNCTUATION_SET
+                    if is_punct:
+                        char_info.append((char, True, -1))
+                    else:
+                        char_info.append((char, False, ts_idx))
+                        ts_idx += 1
+                
+                non_punct_count = sum(1 for c in char_info if not c[1])
+                
+                if non_punct_count == len(timestamp_list):
+                    for i, (char, is_punct, ts_idx) in enumerate(char_info):
+                        if is_punct:
+                            if words:
+                                punct_time = words[-1]['end']
+                                words.append({'text': char, 'start': punct_time, 'end': punct_time})
+                        else:
+                            ts = timestamp_list[ts_idx]
+                            if isinstance(ts, (list, tuple)) and len(ts) >= 2:
+                                words.append({'text': char, 'start': (ts[0] / 1000.0) * ts_factor, 'end': (ts[1] / 1000.0) * ts_factor})
+                    
+                    if words:
+                        return words, 'native'
+        
+        # 方法1b: 尝试从 words 字段提取
         if sentence and 'words' in sentence:
-            # FunASR可能提供词级别时间戳
             for word_info in sentence['words']:
                 word_text = word_info.get('text', '')
-                word_start = word_info.get('start', 0) / 1000.0  # 转为秒
-                word_end = word_info.get('end', 0) / 1000.0
+                word_start = (word_info.get('start', 0) / 1000.0) * ts_factor
+                word_end = (word_info.get('end', 0) / 1000.0) * ts_factor
                 if word_text:
-                    words.append({
-                        'text': word_text,
-                        'start': word_start,
-                        'end': word_end
-                    })
+                    words.append({'text': word_text, 'start': word_start, 'end': word_end})
             if words:
-                logger.debug(f"✅ 从FunASR结果中提取到 {len(words)} 个词级别时间戳")
-                return words
+                return words, 'native'
         
-        # 方法2: 如果没有词级别时间戳，使用分词+线性插值
+        # 方法2: 分词+timestamp映射
+        if sentence and 'timestamp' in sentence:
+            timestamp_list = sentence.get('timestamp', [])
+            if timestamp_list and text:
+                words = self._map_timestamps_to_words(text, timestamp_list, ts_factor)
+                if words:
+                    return words, 'mapped'
+        
+        # 方法3: 智能分词+子句插值（降级方案）
         if not text or not text.strip():
-            return words
+            return words, 'interpolated'
         
         try:
-            import jieba
-            import re
+            # 中英文标点符号集合
+            PUNCTUATION_SET = set('，。！？、；：""''（）【】《》—…·,.!?;:\'"()[]<>-–—')
+            # 句子结束标点（用于拆分子句）
+            SENTENCE_END_PUNCT = set('。！？.!?')
             
-            # 使用jieba进行中文分词，保留所有字符（包括标点和空格）
-            # 先分词，然后按原始文本顺序重建
+            def is_punctuation(word: str) -> bool:
+                """判断是否为纯标点符号"""
+                return all(c in PUNCTUATION_SET or c.isspace() for c in word)
+            
+            def is_sentence_end(word: str) -> bool:
+                """判断是否为句子结束标点"""
+                return word in SENTENCE_END_PUNCT
+            
+            def estimate_syllables(word: str) -> int:
+                """估算词的音节数"""
+                if is_punctuation(word):
+                    return 0
+                chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', word))
+                english_part = re.sub(r'[\u4e00-\u9fff\d]', '', word)
+                english_syllables = 0
+                if english_part.strip():
+                    vowel_groups = re.findall(r'[aeiouAEIOU]+', english_part)
+                    english_syllables = max(1, len(vowel_groups)) if re.search(r'[a-zA-Z]', english_part) else 0
+                digits = len(re.findall(r'\d', word))
+                total = chinese_chars + english_syllables + digits
+                return max(1, total) if total > 0 else 1
+            
+            def process_clause(word_list: list, clause_start: float, clause_end: float) -> list:
+                """处理单个子句，返回带时间戳的词列表"""
+                if not word_list:
+                    return []
+                
+                clause_words = []
+                duration = clause_end - clause_start
+                if duration <= 0:
+                    duration = max(len(word_list), 1) * 0.2
+                    clause_end = clause_start + duration
+                
+                syllable_counts = [estimate_syllables(w) for w in word_list]
+                total_syllables = sum(syllable_counts)
+                
+                if total_syllables == 0:
+                    total_syllables = max(sum(1 for w in word_list if not is_punctuation(w)), 1)
+                    syllable_counts = [1 if not is_punctuation(w) else 0 for w in word_list]
+                
+                current_time = clause_start
+                for word, syllables in zip(word_list, syllable_counts):
+                    if syllables == 0:
+                        clause_words.append({'text': word, 'start': current_time, 'end': current_time})
+                    else:
+                        word_duration = (syllables / total_syllables) * duration
+                        clause_words.append({'text': word, 'start': current_time, 'end': current_time + word_duration})
+                        current_time += word_duration
+                
+                # 确保最后一个非标点词的结束时间等于子句结束时间
+                for w in reversed(clause_words):
+                    if w['start'] != w['end']:
+                        w['end'] = clause_end
+                        break
+                
+                return clause_words
+            
+            # 使用jieba进行中文分词
             word_segments = list(jieba.cut(text, cut_all=False))
-            
-            # 移除空字符串，但保留其他字符（包括标点）
             word_list = [w for w in word_segments if w]
             
             if not word_list:
-                return words
+                return words, 'interpolated'
             
-            # 计算每个词的时间戳（线性插值）
             duration = end_time - start_time
             if duration <= 0:
-                # 如果时间戳无效，给每个词分配相同的时间
-                duration = len(word_list) * 0.3  # 假设每个词0.3秒
+                non_punct_count = sum(1 for w in word_list if not is_punctuation(w))
+                duration = max(non_punct_count, 1) * 0.3
                 end_time = start_time + duration
             
-            # 计算总字符数（用于按比例分配时间）
-            total_chars = sum(len(w) for w in word_list)
-            if total_chars == 0:
-                return words
+            # ===== 核心改进：按句号拆分子句 =====
+            # 只有当句子较长时才拆分（超过20秒或超过50个词）
+            should_split = duration > 20 or len(word_list) > 50
             
-            current_time = start_time
-            for word in word_list:
-                # 根据字符数比例分配时间
-                word_duration = (len(word) / total_chars) * duration
-                word_start = current_time
-                word_end = current_time + word_duration
+            if should_split:
+                # 拆分成多个子句
+                clauses = []  # 每个元素是 (word_list, syllable_count)
+                current_clause = []
+                current_syllables = 0
                 
-                words.append({
-                    'text': word,
-                    'start': word_start,
-                    'end': word_end
-                })
+                for word in word_list:
+                    current_clause.append(word)
+                    current_syllables += estimate_syllables(word)
+                    
+                    if is_sentence_end(word) and len(current_clause) > 1:
+                        # 遇到句号，结束当前子句
+                        clauses.append((current_clause, current_syllables))
+                        current_clause = []
+                        current_syllables = 0
                 
-                current_time = word_end
+                # 处理最后一个子句（可能没有句号结尾）
+                if current_clause:
+                    clauses.append((current_clause, current_syllables))
+                
+                # 按子句音节数比例分配时间
+                total_syllables = sum(c[1] for c in clauses)
+                if total_syllables == 0:
+                    total_syllables = len(clauses)
+                
+                current_time = start_time
+                for clause_words, clause_syllables in clauses:
+                    # 计算子句时长
+                    if clause_syllables == 0:
+                        clause_syllables = max(sum(1 for w in clause_words if not is_punctuation(w)), 1)
+                    clause_duration = (clause_syllables / total_syllables) * duration
+                    clause_end = current_time + clause_duration
+                    
+                    # 处理子句
+                    clause_result = process_clause(clause_words, current_time, clause_end)
+                    words.extend(clause_result)
+                    
+                    current_time = clause_end
+                
+                # 确保最后一个词的结束时间等于句子结束时间
+                if words:
+                    for w in reversed(words):
+                        if w['start'] != w['end']:
+                            w['end'] = end_time
+                            break
+                
+                logger.debug(f"超长句子拆分: {len(clauses)} 个子句, {len(words)} 个词")
+            else:
+                # 短句子直接处理
+                words = process_clause(word_list, start_time, end_time)
+                logger.debug(f"使用分词+音节插值: {len(words)} 个词")
             
-            # 确保最后一个词的结束时间等于句子结束时间
-            if words:
-                words[-1]['end'] = end_time
-            
-            # 验证：确保所有词的文本加起来等于原文本（去除空格比较）
+            # 验证文本完整性
             reconstructed_text = ''.join([w['text'] for w in words])
             if reconstructed_text.replace(' ', '') != text.replace(' ', ''):
                 logger.warning(f"⚠️ 分词后文本不匹配，原文本长度: {len(text)}, 重建长度: {len(reconstructed_text)}")
             
-            logger.debug(f"✅ 使用分词+插值生成 {len(words)} 个词级别时间戳")
-            
         except Exception as e:
             logger.warning(f"⚠️ 词级别时间戳提取失败: {e}，将使用句子级别时间戳")
-            # 如果分词失败，至少返回一个包含整个句子的词
             if text.strip():
                 words.append({
                     'text': text.strip(),
@@ -344,7 +513,78 @@ class ASRRunner:
                     'end': end_time
                 })
         
-        return words
+        return words, 'interpolated'
+    
+    def _map_timestamps_to_words(self, text: str, timestamp_list: List, ts_factor: float = 1.0) -> List[Dict]:
+        """
+        将FunASR的字级别timestamp映射到词级别
+        FunASR的timestamp不包含标点符号，需要特殊处理
+        
+        Args:
+            text: 文本内容
+            timestamp_list: FunASR返回的timestamp列表 [[start, end], ...]
+            ts_factor: 时间戳校正因子
+            
+        Returns:
+            词级别时间戳列表
+        """
+        import jieba
+        
+        words = []
+        PUNCTUATION_SET = set('，。！？、；：""''（）【】《》—…·,.!?;:\'"()[]<>-–—')
+        
+        try:
+            # 使用jieba分词
+            word_segments = list(jieba.cut(text, cut_all=False))
+            word_list = [w for w in word_segments if w]
+            
+            # 为每个词计算时间戳
+            # timestamp只对应非标点字符，所以需要跟踪ts_index
+            ts_index = 0
+            
+            for word in word_list:
+                # 检查这个词是否是纯标点
+                is_pure_punct = all(c in PUNCTUATION_SET for c in word)
+                
+                if is_pure_punct:
+                    # 标点使用前一个词的结束时间
+                    if words:
+                        punct_time = words[-1]['end']
+                        words.append({
+                            'text': word,
+                            'start': punct_time,
+                            'end': punct_time
+                        })
+                else:
+                    # 计算这个词中的非标点字符数
+                    non_punct_chars = [c for c in word if c not in PUNCTUATION_SET]
+                    num_non_punct = len(non_punct_chars)
+                    
+                    if ts_index + num_non_punct > len(timestamp_list):
+                        # 时间戳不够了，跳出
+                        break
+                    
+                    # 获取该词的起始和结束时间
+                    word_start_ts = timestamp_list[ts_index]
+                    word_end_ts = timestamp_list[ts_index + num_non_punct - 1]
+                    
+                    if isinstance(word_start_ts, (list, tuple)) and isinstance(word_end_ts, (list, tuple)):
+                        word_start = (word_start_ts[0] / 1000.0) * ts_factor  # 毫秒转秒，并应用校正
+                        word_end = (word_end_ts[1] / 1000.0) * ts_factor
+                        
+                        words.append({
+                            'text': word,
+                            'start': word_start,
+                            'end': word_end
+                        })
+                    
+                    ts_index += num_non_punct
+            
+            return words
+            
+        except Exception as e:
+            logger.warning(f"⚠️ timestamp映射异常: {e}")
+            return words
     
     def get_pool_stats(self) -> Optional[dict]:
         """获取模型池统计信息"""

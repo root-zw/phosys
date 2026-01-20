@@ -65,7 +65,12 @@ class DiarizationProcessor:
         return merged
     
     def merge_consecutive_segments(self, transcript_data: List[Dict]) -> List[Dict]:
-        """合并属于同一个发言人的连续语音片段"""
+        """
+        合并属于同一个发言人的连续语音片段
+        
+        注意：词级别时间戳的准确性由 ASRRunner._extract_word_timestamps 保证，
+        该方法会对超长句子按句号拆分子句，每个子句独立计算时间戳，避免误差累积。
+        """
         if not transcript_data:
             return []
         

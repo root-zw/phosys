@@ -26,7 +26,15 @@ def save_transcript_to_word(transcript_data, filename_prefix="transcript", langu
         # 定义黑色（RGB(0,0,0)）
         black_color = RGBColor(0, 0, 0)
         
-        title = doc.add_heading('语音转文字结果', 0)
+        # 构建标题：音频文件名 + 转写结果
+        if audio_filename:
+            # 去掉文件扩展名，只保留文件名
+            base_name = os.path.splitext(audio_filename)[0]
+            title_text = f"{base_name}转写结果"
+        else:
+            title_text = '转写结果'
+        
+        title = doc.add_heading(title_text, 0)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
         # 设置标题为微软雅黑，黑色
         for run in title.runs:
@@ -43,57 +51,67 @@ def save_transcript_to_word(transcript_data, filename_prefix="transcript", langu
             row.cells[0].width = Inches(1.5)
             row.cells[1].width = Inches(5.0)
         
-        # 设置表格第一列（标签）为宋体11号加粗，黑色，居中
+        # 设置表格第一列（标签）为仿宋_GB2312，黑色，居中
         info_table.rows[0].cells[0].text = '生成时间'
         label_para = info_table.rows[0].cells[0].paragraphs[0]
         label_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         label_run = label_para.runs[0]
         label_run.bold = False
-        label_run.font.size = Pt(11)
-        label_run.font.name = 'SimSun'
+        label_run.font.size = Pt(16)
+        label_run.font.name = '仿宋_GB2312'
         label_run.font.color.rgb = black_color
-        label_run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+        label_run._element.rPr.rFonts.set(qn('w:eastAsia'), '仿宋_GB2312')
+        label_run._element.rPr.rFonts.set(qn('w:ascii'), '仿宋_GB2312')
+        label_run._element.rPr.rFonts.set(qn('w:hAnsi'), '仿宋_GB2312')
         
-        # 设置表格第二列（值）为宋体11号加粗，黑色，居中
+        # 设置表格第二列（值）为仿宋_GB2312，黑色，居中
         info_table.rows[0].cells[1].text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         value_para = info_table.rows[0].cells[1].paragraphs[0]
         value_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         value_run = value_para.runs[0]
         value_run.bold = False
-        value_run.font.size = Pt(11)
-        value_run.font.name = 'SimSun'
+        value_run.font.size = Pt(16)
+        value_run.font.name = '仿宋_GB2312'
         value_run.font.color.rgb = black_color
-        value_run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+        value_run._element.rPr.rFonts.set(qn('w:eastAsia'), '仿宋_GB2312')
+        value_run._element.rPr.rFonts.set(qn('w:ascii'), '仿宋_GB2312')
+        value_run._element.rPr.rFonts.set(qn('w:hAnsi'), '仿宋_GB2312')
         
         info_table.rows[1].cells[0].text = '音频文件'
         label_para = info_table.rows[1].cells[0].paragraphs[0]
         label_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         label_run = label_para.runs[0]
         label_run.bold = False
-        label_run.font.size = Pt(11)
-        label_run.font.name = 'SimSun'
+        label_run.font.size = Pt(16)
+        label_run.font.name = '仿宋_GB2312'
         label_run.font.color.rgb = black_color
-        label_run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+        label_run._element.rPr.rFonts.set(qn('w:eastAsia'), '仿宋_GB2312')
+        label_run._element.rPr.rFonts.set(qn('w:ascii'), '仿宋_GB2312')
+        label_run._element.rPr.rFonts.set(qn('w:hAnsi'), '仿宋_GB2312')
         
         info_table.rows[1].cells[1].text = audio_filename or "未知文件"
         value_para = info_table.rows[1].cells[1].paragraphs[0]
         value_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         value_run = value_para.runs[0]
         value_run.bold = False
-        value_run.font.size = Pt(11)
-        value_run.font.name = 'SimSun'
+        value_run.font.size = Pt(16)
+        value_run.font.name = '仿宋_GB2312'
         value_run.font.color.rgb = black_color
-        value_run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+        value_run._element.rPr.rFonts.set(qn('w:eastAsia'), '仿宋_GB2312')
+        value_run._element.rPr.rFonts.set(qn('w:ascii'), '仿宋_GB2312')
+        value_run._element.rPr.rFonts.set(qn('w:hAnsi'), '仿宋_GB2312')
         
         info_table.rows[2].cells[0].text = '文本长度'
         label_para = info_table.rows[2].cells[0].paragraphs[0]
         label_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         label_run = label_para.runs[0]
         label_run.bold = False
-        label_run.font.size = Pt(11)
-        label_run.font.name = 'SimSun'
+        label_run.font.size = Pt(16)
+        label_run.font.name = '仿宋_GB2312'
         label_run.font.color.rgb = black_color
-        label_run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+        label_run._element.rPr.rFonts.set(qn('w:eastAsia'), '仿宋_GB2312')
+        label_run._element.rPr.rFonts.set(qn('w:ascii'), '仿宋_GB2312')
+        label_run._element.rPr.rFonts.set(qn('w:hAnsi'), '仿宋_GB2312')
         
         total_chars = sum(len(entry['text']) for entry in transcript_data)
         info_table.rows[2].cells[1].text = f"{total_chars} 字符"
@@ -101,10 +119,12 @@ def save_transcript_to_word(transcript_data, filename_prefix="transcript", langu
         value_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         value_run = value_para.runs[0]
         value_run.bold = False
-        value_run.font.size = Pt(11)
-        value_run.font.name = 'SimSun'
+        value_run.font.size = Pt(16)
+        value_run.font.name = '仿宋_GB2312'
         value_run.font.color.rgb = black_color
-        value_run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+        value_run._element.rPr.rFonts.set(qn('w:eastAsia'), '仿宋_GB2312')
+        value_run._element.rPr.rFonts.set(qn('w:ascii'), '仿宋_GB2312')
+        value_run._element.rPr.rFonts.set(qn('w:hAnsi'), '仿宋_GB2312')
         
         doc.add_paragraph()
         
@@ -112,10 +132,12 @@ def save_transcript_to_word(transcript_data, filename_prefix="transcript", langu
             speaker_para = doc.add_paragraph()
             speaker_run = speaker_para.add_run(entry['speaker'])
             speaker_run.bold = False
-            speaker_run.font.size = Pt(12)
-            speaker_run.font.name = 'SimSun'
+            speaker_run.font.size = Pt(16)
+            speaker_run.font.name = '仿宋_GB2312'
             speaker_run.font.color.rgb = black_color
-            speaker_run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+            speaker_run._element.rPr.rFonts.set(qn('w:eastAsia'), '仿宋_GB2312')
+            speaker_run._element.rPr.rFonts.set(qn('w:ascii'), '仿宋_GB2312')
+            speaker_run._element.rPr.rFonts.set(qn('w:hAnsi'), '仿宋_GB2312')
             # 设置发言人段落的下间距为0，使内容紧跟在后面
             speaker_para.paragraph_format.space_after = Pt(0)
             
@@ -124,10 +146,12 @@ def save_transcript_to_word(transcript_data, filename_prefix="transcript", langu
             text_para.paragraph_format.space_before = Pt(0)
             text_para.paragraph_format.space_after = Pt(0)
             text_run = text_para.add_run(entry['text'])
-            text_run.font.size = Pt(12)
-            text_run.font.name = 'SimSun'
+            text_run.font.size = Pt(16)
+            text_run.font.name = '仿宋_GB2312'
             text_run.font.color.rgb = black_color
-            text_run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+            text_run._element.rPr.rFonts.set(qn('w:eastAsia'), '仿宋_GB2312')
+            text_run._element.rPr.rFonts.set(qn('w:ascii'), '仿宋_GB2312')
+            text_run._element.rPr.rFonts.set(qn('w:hAnsi'), '仿宋_GB2312')
             
             # 不同发言人之间的间距保持正常
             doc.add_paragraph()
@@ -175,7 +199,15 @@ def save_meeting_summary_to_word(transcript_data, summary_data, filename_prefix=
         # 定义黑色（RGB(0,0,0)）
         black_color = RGBColor(0, 0, 0)
         
-        title = doc.add_heading('会议纪要', 0)
+        # 构建标题：音频文件名 + 会议纪要
+        if audio_filename:
+            # 去掉文件扩展名，只保留文件名
+            base_name = os.path.splitext(audio_filename)[0]
+            title_text = f"{base_name}会议纪要"
+        else:
+            title_text = '会议纪要'
+        
+        title = doc.add_heading(title_text, 0)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
         # 设置标题为华文中宋 二号字体
         for run in title.runs:

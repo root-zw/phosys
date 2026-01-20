@@ -31,6 +31,10 @@ def load_history_from_file(uploaded_files_manager: 'ThreadSafeFileManager'):
             with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 completed_files_from_disk = data.get('files', [])
+                # 兼容老数据：补齐 user 字段，避免后续按 user 过滤时报 KeyError
+                for f in completed_files_from_disk:
+                    if isinstance(f, dict) and 'user' not in f:
+                        f['user'] = 'anonymous'
                 
                 # 保留当前内存中未完成的文件
                 all_files = uploaded_files_manager.get_all_files()
@@ -73,6 +77,10 @@ def save_history_to_file(uploaded_files_manager: 'ThreadSafeFileManager'):
         # 只保存已完成的文件记录
         all_files = uploaded_files_manager.get_all_files()
         completed_files = [f for f in all_files if f['status'] == 'completed']
+        # 兼容：确保写盘的历史记录都带 user 字段
+        for f in completed_files:
+            if isinstance(f, dict) and 'user' not in f:
+                f['user'] = 'anonymous'
         data = {
             'files': completed_files,
             'completed_files': uploaded_files_manager.get_completed_files()

@@ -49,7 +49,8 @@ class FileHandlers:
     
     async def upload_files(
         self,
-        audio_files: List[UploadFile]
+        audio_files: List[UploadFile],
+        user: Optional[str] = None
     ) -> Dict:
         """上传音频文件（支持单个或多个文件）"""
         if not audio_files:
@@ -124,6 +125,7 @@ class FileHandlers:
                             raise
 
                 file_id = str(uuid.uuid4())
+                normalized_user = (user or '').strip() or 'anonymous'
                 
                 file_info = {
                     'id': file_id,
@@ -134,7 +136,8 @@ class FileHandlers:
                     'upload_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'status': 'uploaded',
                     'progress': 0,
-                    'error_message': ''
+                    'error_message': '',
+                    'user': normalized_user
                 }
                 
                 self.file_manager.add_file(file_info)

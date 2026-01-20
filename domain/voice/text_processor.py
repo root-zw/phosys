@@ -4,7 +4,7 @@ Domain - 文本处理领域逻辑
 """
 
 import re
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional, Tuple
 
 
 class TextProcessor:
@@ -75,8 +75,58 @@ class TextProcessor:
         text = text.strip()
         
         return text
+
+    def post_process_text(
+        self,
+        text: str,
+        *,
+        remove_repetitions: bool = True,
+        profanity_words: Optional[List[str]] = None,
+        profanity_action: str = "mask",
+        profanity_mask_char: str = "*",
+        profanity_replacement: str = "[不当内容已处理]",
+        profanity_match_mode: str = "substring",
+    ) -> Tuple[str, Dict]:
+        """
+        文本后处理（可用于展示/导出），包含：
+        - 明显叠词/口吃式重复清理（中英文）
+        - 不当词汇过滤（可配置词表 + 行为）
+
+        Returns:
+            (processed_text, meta)
+            meta: {'changed': bool, 'removed_repetitions': bool, 'profanity_hit': bool}
+        """
+        if not text or text == "[未识别到语音]":
+            return text, {"changed": False, "removed_repetitions": False, "profanity_hit": False}
+
+        original = text
+        removed_repetitions_flag = False
+        profanity_hit = False
+
+        # 基础空白清理
+        processed = self.clean_text(text)
+
+        # 1) 明显叠词/重复（尽量保守，避免误伤正常词汇）
+        if remove_repetitions:
+            processed2, removed_repetitions_flag = self._remove_obvious_repetitions(processed)
+            processed = processed2
+
+        # 2) 不当词汇过滤（默认不内置词库，只按配置词表处理）
+        if profanity_words:
+            processed2, profanity_hit = self._filter_profanity(
+                processed,
+                profanity_words=profanity_words,
+                action=profanity_action,
+                mask_char=profanity_mask_char,
+                replacement=profanity_replacement,
+                match_mode=profanity_match_mode,
+            )
+            processed = processed2
+
+        changed = processed != original
+        return processed, {"changed": changed, "removed_repetitions": removed_repetitions_flag, "profanity_hit": profanity_hit}
     
-    def fix_transcript_text(self, text: str) -> str:
+    def fix_transcript_text(self, text: str, *, remove_repetitions: bool = True) -> str:
         """
         修复转写文本，确保末尾不是逗号
         
@@ -91,11 +141,406 @@ class TextProcessor:
         
         # 先清理空格
         text = self.clean_text(text)
+
+        # ✅ 轻量文本质量修复：明显叠词/口吃重复
+        # 注意：如果需要保证 words 与 text 对齐（逐词高亮），上层应在有 words 时关闭该选项，
+        # 或者使用基于 words 的过滤方式来保持一致性。
+        if remove_repetitions:
+            text, _ = self._remove_obvious_repetitions(text)
         
         # 修复末尾标点符号
         text = self._improve_sentence_completeness(text)
         
         return text
+
+    def filter_profanity_in_words(
+        self,
+        words: List[Dict],
+        *,
+        profanity_words: List[str],
+        action: str = "mask",
+        mask_char: str = "*",
+        replacement: str = "[不当内容已处理]",
+        match_mode: str = "substring",
+    ) -> Tuple[List[Dict], bool]:
+        """
+        在 words 粒度做不当词过滤，保持时间戳不变，并确保最终 entry.text == ''.join(words.text)。
+        这比“直接改整句 text”更适合逐词高亮场景。
+
+        说明：
+        - action=mask：按命中长度打码（推荐，最稳）
+        - action=replace：用 replacement 替换，但会按命中长度做截断/重复以贴合跨度（保证不跨词错位）
+        - action=remove：删除命中文字（会让该 word 文字变短/为空，但时间戳仍保留）
+        """
+        if not words or not profanity_words:
+            return words, False
+
+        # 复制，避免原地修改带来副作用
+        new_words = [dict(w) for w in words]
+        texts = [w.get("text", "") or "" for w in new_words]
+
+        full = "".join(texts)
+        if not full:
+            return new_words, False
+
+        action = (action or "mask").lower().strip()
+        match_mode = (match_mode or "substring").lower().strip()
+
+        # 预计算每个 word 在 full 中的起始偏移
+        starts: List[int] = []
+        pos = 0
+        for t in texts:
+            starts.append(pos)
+            pos += len(t)
+
+        def _normalize_replace(seg_len: int) -> str:
+            if seg_len <= 0:
+                return ""
+            if not replacement:
+                return mask_char * seg_len
+            if len(replacement) == seg_len:
+                return replacement
+            if len(replacement) > seg_len:
+                return replacement[:seg_len]
+            # repeat to fill
+            times = (seg_len + len(replacement) - 1) // len(replacement)
+            return (replacement * times)[:seg_len]
+
+        # 收集所有 match span（start,end），基于原始 full 计算
+        spans: List[Tuple[int, int]] = []
+        rule_list = [w.strip() for w in profanity_words if w and w.strip()]
+        rule_list.sort(key=len, reverse=True)
+
+        for rule in rule_list:
+            # /regex/ or /regex/i
+            if len(rule) >= 2 and rule.startswith("/") and rule.count("/") >= 2:
+                last_slash = rule.rfind("/")
+                pattern = rule[1:last_slash]
+                flags_part = rule[last_slash + 1 :].strip()
+                flags = 0
+                if "i" in flags_part.lower():
+                    flags |= re.IGNORECASE
+                try:
+                    for m in re.finditer(pattern, full, flags):
+                        if m and m.start() < m.end():
+                            spans.append((m.start(), m.end()))
+                except re.error:
+                    continue
+                continue
+
+            # 英文/数字词默认按单词边界匹配
+            if re.fullmatch(r"[A-Za-z0-9_]+", rule):
+                for m in re.finditer(rf"\b{re.escape(rule)}\b", full, flags=re.IGNORECASE):
+                    if m and m.start() < m.end():
+                        spans.append((m.start(), m.end()))
+                continue
+
+            if match_mode == "word":
+                pat = rf"(?<![A-Za-z0-9_]){re.escape(rule)}(?![A-Za-z0-9_])"
+            else:
+                pat = re.escape(rule)
+            for m in re.finditer(pat, full):
+                if m and m.start() < m.end():
+                    spans.append((m.start(), m.end()))
+
+        if not spans:
+            return new_words, False
+
+        # 合并重叠 spans（避免重复处理）
+        spans.sort()
+        merged: List[Tuple[int, int]] = []
+        cur_s, cur_e = spans[0]
+        for s, e in spans[1:]:
+            if s <= cur_e:
+                cur_e = max(cur_e, e)
+            else:
+                merged.append((cur_s, cur_e))
+                cur_s, cur_e = s, e
+        merged.append((cur_s, cur_e))
+
+        # 将 spans 按 word 切分为局部替换（按原始偏移），并在每个 word 内“从后往前”应用避免位移问题
+        per_word_ops: Dict[int, List[Tuple[int, int, str]]] = {}
+        hit = False
+
+        for s, e in merged:
+            if s >= e:
+                continue
+            hit = True
+            # 找到覆盖的 word 范围
+            for i, w_start in enumerate(starts):
+                w_text = texts[i]
+                w_end = w_start + len(w_text)
+                if w_end <= s:
+                    continue
+                if w_start >= e:
+                    break
+                # 相交
+                local_s = max(0, s - w_start)
+                local_e = min(len(w_text), e - w_start)
+                if local_s >= local_e:
+                    continue
+                seg_len = local_e - local_s
+                if action == "remove":
+                    repl = ""
+                elif action == "replace":
+                    repl = _normalize_replace(seg_len)
+                else:
+                    repl = mask_char * seg_len
+                per_word_ops.setdefault(i, []).append((local_s, local_e, repl))
+
+        for idx, ops in per_word_ops.items():
+            t = texts[idx]
+            # 从后往前应用
+            ops.sort(key=lambda x: x[0], reverse=True)
+            for local_s, local_e, repl in ops:
+                t = t[:local_s] + repl + t[local_e:]
+            texts[idx] = t
+            new_words[idx]["text"] = t
+
+        return new_words, hit
+
+    def remove_repetitions_in_words(self, words: List[Dict]) -> Tuple[List[Dict], bool]:
+        """
+        在 words 粒度做“明显口吃/叠词重复”清理，保持时间戳不变，并确保 text 可由 words 重建且对齐高亮。
+        覆盖：
+        - 中文 2~6 字短语连续重复：'这是这是' -> '这是'
+        - 中文短语带空格重复：'这是 这是' -> '这是'
+        - 英文连续重复单词：'the the' -> 'the'
+        - 常见填充词连续重复：'嗯嗯嗯'/'啊 啊' -> 收敛为 1 个
+        """
+        if not words:
+            return words, False
+
+        new_words = [dict(w) for w in words]
+        texts = [w.get("text", "") or "" for w in new_words]
+        full = "".join(texts)
+        if not full:
+            return new_words, False
+
+        # 预计算每个 word 在 full 的起始偏移
+        starts: List[int] = []
+        pos = 0
+        for t in texts:
+            starts.append(pos)
+            pos += len(t)
+
+        # 收集要删除的 spans（start,end），基于 full 偏移
+        spans: List[Tuple[int, int]] = []
+
+        # 1) 填充词连续重复：保留第一个，删除后续
+        fillers = r"(嗯|呃|额|啊|唉|哎|诶)"
+        for m in re.finditer(rf"(?:{fillers})(?:[\s,，、]*{fillers})+", full):
+            if not m:
+                continue
+            spans.append((m.start() + 1, m.end()))
+
+        # 2) 中文短语连续重复（2~6字）
+        for m in re.finditer(r"([\u4e00-\u9fff]{2,6})\1{1,}", full):
+            if not m:
+                continue
+            g = m.group(1)
+            spans.append((m.start() + len(g), m.end()))
+
+        # 3) 中文短语带空格重复
+        for m in re.finditer(r"([\u4e00-\u9fff]{2,6})(?:\s+\1){1,}", full):
+            if not m:
+                continue
+            g = m.group(1)
+            spans.append((m.start() + len(g), m.end()))
+
+        # 4) 英文连续重复单词（忽略大小写）
+        for m in re.finditer(r"\b([A-Za-z]{2,})\b(?:\s+\1\b)+", full, flags=re.IGNORECASE):
+            if not m:
+                continue
+            g = m.group(1)
+            spans.append((m.start() + len(g), m.end()))
+
+        if not spans:
+            return new_words, False
+
+        # 合并 spans
+        spans.sort()
+        merged: List[Tuple[int, int]] = []
+        cur_s, cur_e = spans[0]
+        for s, e in spans[1:]:
+            if s <= cur_e:
+                cur_e = max(cur_e, e)
+            else:
+                merged.append((cur_s, cur_e))
+                cur_s, cur_e = s, e
+        merged.append((cur_s, cur_e))
+
+        # 按 word 切分删除操作（从后往前应用）
+        per_word_ops: Dict[int, List[Tuple[int, int]]] = {}
+        changed = False
+
+        for s, e in merged:
+            if s >= e:
+                continue
+            changed = True
+            for i, w_start in enumerate(starts):
+                w_text = texts[i]
+                w_end = w_start + len(w_text)
+                if w_end <= s:
+                    continue
+                if w_start >= e:
+                    break
+                local_s = max(0, s - w_start)
+                local_e = min(len(w_text), e - w_start)
+                if local_s >= local_e:
+                    continue
+                per_word_ops.setdefault(i, []).append((local_s, local_e))
+
+        for idx, ops in per_word_ops.items():
+            t = texts[idx]
+            ops.sort(key=lambda x: x[0], reverse=True)
+            for local_s, local_e in ops:
+                t = t[:local_s] + "" + t[local_e:]
+            texts[idx] = t
+            new_words[idx]["text"] = t
+
+        return new_words, changed
+
+    def is_tail_only_change(self, original: str, modified: str) -> bool:
+        """
+        判断改动是否仅发生在文本末尾（典型：补句号/替换末尾逗号），用于决定是否可以安全地保留 words。
+        这是保守判定：只要有明显句中改动，就返回 False。
+        """
+        if original == modified:
+            return True
+        if not original or not modified:
+            return False
+
+        a = original.rstrip()
+        b = modified.rstrip()
+
+        # 允许：在末尾新增 1 个句末标点
+        if b.startswith(a) and len(b) - len(a) <= 1:
+            return True
+
+        # 允许：末尾 1 个字符替换（逗号->句号/问号/叹号）
+        if len(a) == len(b) and len(a) >= 1 and a[:-1] == b[:-1]:
+            return True
+
+        # 允许：末尾 2 个字符以内的轻微变化（比如 ", " -> "。"）
+        # 但必须保持绝大部分前缀一致
+        min_len = min(len(a), len(b))
+        prefix_len = 0
+        for i in range(min_len):
+            if a[i] != b[i]:
+                break
+            prefix_len += 1
+        # 只要差异点出现在最后 2 个字符内，就认为是尾部改动
+        return prefix_len >= min_len - 2
+
+    def _remove_obvious_repetitions(self, text: str) -> Tuple[str, bool]:
+        """
+        清理明显的重复（叠词/口吃式重复）。
+        目标是“明显错误”而不是“语气重复”，所以策略偏保守：
+        - 中文：2~6字短语连续重复 -> 保留一次（例如：'这是这是' -> '这是'；'我们我们我们'->'我们'）
+        - 英文：连续重复单词 -> 保留一次（'the the' -> 'the'）
+        - 口头语填充：'嗯嗯'/'啊啊' 连续重复 -> 收敛为 1 个
+        """
+        if not text:
+            return text, False
+
+        original = text
+
+        # 1) 常见口头语填充词：连续重复 -> 收敛为一个
+        fillers = r"(嗯|呃|额|啊|唉|哎|诶)"
+        text = re.sub(rf"(?:{fillers})(?:[\s,，、]*{fillers})+", r"\1", text)
+
+        # 2) 中文短语重复（连续）
+        #    - 用 2~6 字，避免误伤“人人/看看”这类单字叠字（单字叠字不在这里处理）
+        text = re.sub(r"([\u4e00-\u9fff]{2,6})\1{1,}", r"\1", text)
+
+        # 3) 中英文混合场景：带空格的中文短语重复（ASR偶尔会插空格）
+        text = re.sub(r"([\u4e00-\u9fff]{2,6})(?:\s+\1){1,}", r"\1", text)
+
+        # 4) 英文连续重复单词（忽略大小写）
+        text = re.sub(r"\b([A-Za-z]{2,})\b(?:\s+\1\b)+", r"\1", text, flags=re.IGNORECASE)
+
+        # 5) 多余空格再收敛一次
+        text = re.sub(r"\s+", " ", text).strip()
+
+        return text, (text != original)
+
+    def _filter_profanity(
+        self,
+        text: str,
+        *,
+        profanity_words: List[str],
+        action: str = "mask",
+        mask_char: str = "*",
+        replacement: str = "[不当内容已处理]",
+        match_mode: str = "substring",
+    ) -> Tuple[str, bool]:
+        """
+        基于词表的不当词过滤。
+        action:
+          - 'mask': 用 mask_char 按长度打码（默认）
+          - 'replace': 统一替换为 replacement
+          - 'remove': 直接移除
+        规则：
+          - 普通词条：中文按子串匹配；英文/数字按单词边界匹配（忽略大小写）
+          - /regex/ 或 /regex/i：按正则匹配（高级用法）
+        """
+        if not text or not profanity_words:
+            return text, False
+
+        action = (action or "mask").lower().strip()
+        match_mode = (match_mode or "substring").lower().strip()
+        hit = False
+
+        # 词表去重、去空
+        words = [w.strip() for w in profanity_words if w and w.strip()]
+        if not words:
+            return text, False
+
+        # 先长词后短词，避免短词抢占
+        words.sort(key=len, reverse=True)
+
+        def repl(m: re.Match) -> str:
+            nonlocal hit
+            hit = True
+            s = m.group(0)
+            if action == "remove":
+                return ""
+            if action == "replace":
+                return replacement
+            # mask
+            return mask_char * max(len(s), 1)
+
+        # 对英文词做边界匹配，对中文/其他做普通子串匹配（尽量简单且可控）
+        for w in words:
+            # /regex/ 或 /regex/i（可选 i 标志）
+            if len(w) >= 2 and w.startswith("/") and w.count("/") >= 2:
+                # 取最后一个 / 作为结束
+                last_slash = w.rfind("/")
+                pattern = w[1:last_slash]
+                flags_part = w[last_slash + 1 :].strip()
+                flags = 0
+                if "i" in flags_part.lower():
+                    flags |= re.IGNORECASE
+                try:
+                    text = re.sub(pattern, repl, text, flags=flags)
+                except re.error:
+                    # 正则有误则跳过
+                    continue
+                continue
+
+            if re.fullmatch(r"[A-Za-z0-9_]+", w):
+                text = re.sub(rf"\b{re.escape(w)}\b", repl, text, flags=re.IGNORECASE)
+            else:
+                if match_mode == "word":
+                    # 尝试用“非字母数字下划线”作为边界（对中英混合更稳一点）
+                    text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(w)}(?![A-Za-z0-9_])", repl, text)
+                else:
+                    text = re.sub(re.escape(w), repl, text)
+
+        # 清理多余空格
+        text = re.sub(r"\s+", " ", text).strip()
+        return text, hit
     
     def _check_context_consistency(self, text: str, speaker_id: int,
                                    speaker_context: Dict, full_transcript: List) -> str:

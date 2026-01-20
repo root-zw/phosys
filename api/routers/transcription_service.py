@@ -219,6 +219,7 @@ class TranscriptionService:
                     detail_data = {
                         'file_id': file_id,
                         'filename': file_info['original_name'],
+                        'user': file_info.get('user', 'anonymous'),
                         'transcript': transcript_data,
                         'total_chars': sum(len(entry.get('text', '')) for entry in transcript) if transcript else 0,
                         'segment_count': len(transcript) if transcript else 0
@@ -231,7 +232,8 @@ class TranscriptionService:
                         module="VoiceGateway",
                         message=f"转写任务成功完成: {file_info['original_name']}",
                         detail=success_detail,
-                        file_size=file_size
+                        file_size=file_size,
+                        user=file_info.get('user')
                     )
             else:
                 file_info['status'] = 'error'
@@ -249,7 +251,8 @@ class TranscriptionService:
                         task_id=file_id,
                         module="VoiceGateway",
                         message=f"转写失败: {file_info['original_name']} - 转写结果为空",
-                        exception=None
+                        exception=None,
+                        user=file_info.get('user')
                     )
                 
         except InterruptedError as e:
@@ -295,7 +298,8 @@ class TranscriptionService:
                         task_id=file_id,
                         module="VoiceGateway",
                         message=f"处理文件失败: {file_info['original_name']}",
-                        exception=e
+                        exception=e,
+                        user=file_info.get('user')
                     )
             
             import traceback

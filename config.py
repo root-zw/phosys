@@ -11,6 +11,30 @@ from dotenv import load_dotenv
 # 加载环境变量
 load_dotenv()
 
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_wordlist_file(path: str) -> list[str]:
+    """从词库文件加载词表（支持注释/空行）。支持相对路径（相对项目根目录）。"""
+    if not path:
+        return []
+    file_path = path
+    if not os.path.isabs(file_path):
+        file_path = os.path.join(_BASE_DIR, file_path)
+    if not os.path.exists(file_path):
+        return []
+    words: list[str] = []
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                words.append(s)
+    except Exception:
+        return []
+    return words
+
 # 1. 文件与目录配置
 # 支持通过环境变量覆盖，便于不同环境使用不同路径
 FILE_CONFIG = {
@@ -83,11 +107,50 @@ LANGUAGE_CONFIG = {
     }
 }
 
+# 8. 文本后处理配置（转写结果展示/导出质量优化）
+# - 叠词/口吃式重复：默认启用（偏保守，仅处理明显连续重复）
+# - 不当词过滤：默认关闭（建议通过环境变量提供词表）
+TEXT_POSTPROCESS_CONFIG = {
+    "enabled": os.getenv("TEXT_POSTPROCESS_ENABLED", "true").lower() == "true",
+    "remove_repetitions": os.getenv("TEXT_REMOVE_REPETITIONS", "true").lower() == "true",
+    # 不当词过滤（默认关闭，避免误伤；如需启用请配置词表）
+    "profanity": {
+        "enabled": os.getenv("TEXT_PROFANITY_ENABLED", "false").lower() == "true",
+        # mask | replace | remove
+        "action": os.getenv("TEXT_PROFANITY_ACTION", "mask").lower(),
+        "mask_char": os.getenv("TEXT_PROFANITY_MASK_CHAR", "*"),
+        "replacement": os.getenv("TEXT_PROFANITY_REPLACEMENT", "[不当内容已处理]"),
+        # 匹配模式：
+        # - substring: 中文/混合内容默认（命中子串即处理）
+        # - word: 仅按“词边界”匹配（适合纯英文/数字词）
+        "match_mode": os.getenv("TEXT_PROFANITY_MATCH_MODE", "substring").lower(),
+        # 词表来源：
+        # - TEXT_PROFANITY_WORDS: 逗号分隔词表，例如 "xxx,yyy,zzz"
+        # - TEXT_PROFANITY_WORDS_FILE: 词库文件路径（支持注释/空行）
+        "words_file": os.getenv("TEXT_PROFANITY_WORDS_FILE", "resources/profanity_words_zh.txt"),
+        "words": [],
+    }
+}
+
+# 合并词表：文件词表 + env 词表（env 优先级更高：追加在后面，便于覆盖/补充）
+_env_words = [w.strip() for w in os.getenv("TEXT_PROFANITY_WORDS", "").split(",") if w.strip()]
+_file_words = _load_wordlist_file(TEXT_POSTPROCESS_CONFIG["profanity"].get("words_file", ""))
+TEXT_POSTPROCESS_CONFIG["profanity"]["words"] = _file_words + _env_words
+
 # 4. 音频处理配置
 # ModelScope的语音模型通常要求音频为16kHz采样率的单声道WAV格式
 AUDIO_PROCESS_CONFIG = {
     "sample_rate": 16000,
     "channels": 1
+}
+
+# 4.2 时间戳校正配置
+# FunASR模型可能存在时间戳漂移，通过校正因子修正
+# 如果发现时间戳比实际音频快，使用小于1的因子；如果慢，使用大于1的因子
+TIMESTAMP_CORRECTION_CONFIG = {
+    "enabled": os.getenv("TIMESTAMP_CORRECTION_ENABLED", "false").lower() == "true",  # 默认禁用
+    # 校正因子：1.0表示不校正
+    "correction_factor": float(os.getenv("TIMESTAMP_CORRECTION_FACTOR", "1.0")),
 }
 
 # 4.1 音频预处理配置

@@ -102,6 +102,69 @@ def send_alarm_webhook(task_id: str, module: str, level: str, message: str, deta
     )
 
 
+def _build_event_payload(
+    task_id: str,
+    event_type: str,
+    module: str,
+    level: str,
+    message: str,
+    detail: str = "",
+    file_id: str = "",
+    filename: str = "",
+    file_size: int = 0,
+    user: Optional[str] = None
+) -> dict:
+    """
+    构建发送给 Dify 的事件 payload（纯函数，便于自测）
+    """
+    # 构建 detail，如果提供了额外信息，合并到 detail 中
+    detail_obj = {}
+    if detail:
+        try:
+            # 尝试解析为 JSON
+            detail_obj = json.loads(detail)
+            if not isinstance(detail_obj, dict):
+                detail_obj = {"raw": detail}
+        except (json.JSONDecodeError, TypeError):
+            # 如果不是 JSON，作为普通文本
+            detail_obj = {"raw": detail}
+
+    # 添加文件信息到 detail
+    if file_id:
+        detail_obj["file_id"] = file_id
+    if filename:
+        detail_obj["filename"] = filename
+    if file_size > 0:
+        detail_obj["file_size"] = file_size
+
+    # 将 detail_obj 转换回 JSON 字符串
+    detail_str = json.dumps(detail_obj, ensure_ascii=False) if detail_obj else ""
+
+    normalized_user = (user or "").strip()
+
+    payload = {
+        "inputs": {
+            "task_id": str(task_id),
+            "level": level,
+            "module": module,
+            "message": message,
+            "detail": detail_str,
+            "timestamp": datetime.now().isoformat(),
+            "event_type": event_type,  # 新增：事件类型
+            "file_id": str(file_id) if file_id else str(task_id),  # 新增：文件ID
+            "filename": str(filename) if filename else "",  # 新增：文件名
+            "file_size": int(file_size) if file_size > 0 else 0,  # 新增：文件大小
+            # 新增：业务侧用户标识（便于工作流内使用/检索）
+            "caller_user": normalized_user
+        },
+        "response_mode": "blocking",  # 保证日志发送的可靠性
+        # ✅ 最重要：Dify 顶层 user 用业务 user（若未提供则回退到配置/事件ID）
+        "user": normalized_user or (DIFY_USER_ID if DIFY_USER_ID else f"event_{task_id}")
+    }
+
+    return payload
+
+
 def log_event(
     task_id: str,
     event_type: str,
@@ -111,7 +174,8 @@ def log_event(
     detail: str = "",
     file_id: str = "",
     filename: str = "",
-    file_size: int = 0
+    file_size: int = 0,
+    user: Optional[str] = None
 ):
     """
     通用事件日志函数 - 发送结构化事件到 Dify
@@ -145,46 +209,19 @@ def log_event(
         logger.info("[Dify] 未指定 workflow_id，将使用已发布的工作流版本")
     
     logger.info(f"[Dify] 📤 准备发送事件日志: event_type={event_type}, level={level}, module={module}, message={message}, file_id={file_id}, filename={filename}")
-    
-    # 构建 detail，如果提供了额外信息，合并到 detail 中
-    detail_obj = {}
-    if detail:
-        try:
-            # 尝试解析为 JSON
-            detail_obj = json.loads(detail)
-            if not isinstance(detail_obj, dict):
-                detail_obj = {"raw": detail}
-        except (json.JSONDecodeError, TypeError):
-            # 如果不是 JSON，作为普通文本
-            detail_obj = {"raw": detail}
-    
-    # 添加文件信息到 detail
-    if file_id:
-        detail_obj["file_id"] = file_id
-    if filename:
-        detail_obj["filename"] = filename
-    if file_size > 0:
-        detail_obj["file_size"] = file_size
-    
-    # 将 detail_obj 转换回 JSON 字符串
-    detail_str = json.dumps(detail_obj, ensure_ascii=False) if detail_obj else ""
-    
-    payload = {
-        "inputs": {
-            "task_id": str(task_id),
-            "level": level,
-            "module": module,
-            "message": message,
-            "detail": detail_str,
-            "timestamp": datetime.now().isoformat(),
-            "event_type": event_type,  # 新增：事件类型
-            "file_id": str(file_id) if file_id else str(task_id),  # 新增：文件ID
-            "filename": str(filename) if filename else "",  # 新增：文件名
-            "file_size": int(file_size) if file_size > 0 else 0  # 新增：文件大小
-        },
-        "response_mode": "blocking",  # 保证日志发送的可靠性
-        "user": DIFY_USER_ID if DIFY_USER_ID else f"event_{task_id}"
-    }
+
+    payload = _build_event_payload(
+        task_id=task_id,
+        event_type=event_type,
+        module=module,
+        level=level,
+        message=message,
+        detail=detail,
+        file_id=file_id,
+        filename=filename,
+        file_size=file_size,
+        user=user
+    )
     
     # 使用异步线程发送 (推荐!)，防止 Webhook 延迟影响主业务流
     threading.Thread(
@@ -195,7 +232,7 @@ def log_event(
     ).start()
 
 
-def log_error_alarm(task_id: str, module: str, message: str, exception: Optional[Exception] = None):
+def log_error_alarm(task_id: str, module: str, message: str, exception: Optional[Exception] = None, user: Optional[str] = None):
     """
     专门用于捕获异常并发送 ERROR 报警的辅助函数
     
@@ -232,11 +269,12 @@ def log_error_alarm(task_id: str, module: str, message: str, exception: Optional
         module=enhanced_module,
         level="ERROR",
         message=message,
-        detail=error_stack
+        detail=error_stack,
+        user=user
     )
 
 
-def log_success_alarm(task_id: str, module: str, message: str, detail: str = "", file_size: int = 0):
+def log_success_alarm(task_id: str, module: str, message: str, detail: str = "", file_size: int = 0, user: Optional[str] = None):
     """
     发送 SUCCESS 报警的辅助函数（转写成功专用）
     
@@ -269,7 +307,8 @@ def log_success_alarm(task_id: str, module: str, message: str, detail: str = "",
         detail=detail,
         file_id=file_id,
         filename=filename,
-        file_size=file_size
+        file_size=file_size,
+        user=user
     )
 
 
@@ -441,7 +480,7 @@ def log_clear_history_event(
     )
 
 
-def log_stop_transcription_event(file_id: str, filename: str, level: str, error: Optional[Exception] = None, progress: int = 0):
+def log_stop_transcription_event(file_id: str, filename: str, level: str, error: Optional[Exception] = None, progress: int = 0, user: Optional[str] = None):
     """
     记录停止转写事件
     
@@ -485,6 +524,7 @@ def log_stop_transcription_event(file_id: str, filename: str, level: str, error:
         message=message,
         detail=detail,
         file_id=file_id,
-        filename=filename
+        filename=filename,
+        user=user
     )
 
